@@ -20,7 +20,7 @@ jobs:
       - name: Build DCT
         run: | 
           go mod tidy
-          CGO_ENABLED=0 go build -ldflags="-s -w -extldflags '-static'"
+          CGO_ENABLED=0 go build -ldflags="-s -w -extldflags '-static'" -o dct
 
       - name: Install UPX
         run: | 
