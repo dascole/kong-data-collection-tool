@@ -34,4 +34,5 @@ jobs:
       - name: Upload Compressed Binary
         uses: actions/upload-artifact@v4
         with:
-          name: ./dct
+          name: compressed-dct-binary
+          path: ./dct
