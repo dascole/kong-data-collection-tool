@@ -865,27 +865,21 @@ func runVM() ([]string, error) {
 		cpuInfo, err := getResourceAndMarshall(RetrieveVMCPUInfo, "cpu")
 
 		if err != nil {
-			log.Error("Error retrieving memory info: ", err.Error())
+			log.Error("Error retrieving CPU info: ", err.Error())
 		}
 
 		data, ok = cpuInfo.([]byte)
 		if !ok {
-			log.Error("Error converting memory info to bytes")
+			log.Error("Error converting CPU info to bytes")
 			return nil, err
 		}
-		err = os.WriteFile(vmMemoryLogFile, data, 0644)
+		err = os.WriteFile(vmCPULogFile, data, 0644)
 		if err != nil {
 			log.Error("Error writing memory info: ", err.Error())
 			return nil, err
 		}
 		//meminfo
 
-
-		err = os.WriteFile(vmCPULogFile, data, 0644)
-		if err != nil {
-			log.Error("Error writing cpu info: ", err.Error())
-			return nil, err
-		}
 		filesToZip = append(filesToZip, vmCPULogFile)
 		//cpuinfo
 
