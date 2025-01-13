@@ -849,6 +849,7 @@ func runVM() ([]string, error) {
 		data, ok := memoryInfo.([]byte)
 		if !ok {
 			log.Error("Error converting memory info to bytes")
+
 			return nil, err
 		}
 
@@ -857,10 +858,36 @@ func runVM() ([]string, error) {
 			log.Error("Error writing memory info: ", err.Error())
 			return nil, err
 		}
-		//meminfo
-
 		filesToZip = append(filesToZip, vmMemoryLogFile)
 		//meminfo
+
+		//cpuinfo
+		cpuInfo, err := getResourceAndMarshall(RetrieveVMCPUInfo, "cpu")
+
+		if err != nil {
+			log.Error("Error retrieving memory info: ", err.Error())
+		}
+
+		data, ok = cpuInfo.([]byte)
+		if !ok {
+			log.Error("Error converting memory info to bytes")
+			return nil, err
+		}
+		err = os.WriteFile(vmMemoryLogFile, data, 0644)
+		if err != nil {
+			log.Error("Error writing memory info: ", err.Error())
+			return nil, err
+		}
+		//meminfo
+
+
+		err = os.WriteFile(vmCPULogFile, data, 0644)
+		if err != nil {
+			log.Error("Error writing cpu info: ", err.Error())
+			return nil, err
+		}
+		filesToZip = append(filesToZip, vmCPULogFile)
+		//cpuinfo
 
 		//Config keys that have the paths to log files that need extracting
 		configKeys := []string{"admin_access_log", "admin_error_log", "proxy_access_log", "proxy_error_log"}
