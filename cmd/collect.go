@@ -46,6 +46,7 @@ import (
 	"github.com/kong/deck/state"
 	"github.com/kong/deck/utils"
 	"github.com/kong/go-kong/kong"
+	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/mem"
 	"github.com/spf13/cobra"
 
@@ -76,7 +77,9 @@ const (
 	Kubernetes       = "kubernetes"
 	VM               = "vm"
 	LineLimitDefault = int64(1000)
-	vmMemoryLogFile  = "vm-resource-summary.txt"
+	vmMemoryLogFile  = "vm-memory-summary.json"
+	vmCPULogFile     = "vm-cpu-summary.json"
+	vmDiskLogFile    = "vm-disk-summary.json"
 )
 
 var (
@@ -110,6 +113,11 @@ type MemoryInfo struct {
 	PhysicalAvailable float64
 	SwapTotal         float64
 	SwapFree          float64
+}
+
+type CPUInfo struct {
+	CPU   int
+	Cores int32
 }
 
 type PortForwardAPodRequest struct {
@@ -820,7 +828,6 @@ func runVM() ([]string, error) {
 
 		log.Info("Writing kong environment data...")
 
-		// mem info
 		if _, err = io.Copy(configSummary, bytes.NewReader(d)); err != nil {
 			log.Error(err)
 		}
@@ -832,29 +839,25 @@ func runVM() ([]string, error) {
 			return nil, err
 		}
 
-		memoryInfo, err := RetrieveVMMemoryInfo()
+		//meminfo
+		memoryInfo, err := getResourceAndMarshall(RetrieveVMMemoryInfo, "memory")
 
 		if err != nil {
 			log.Error("Error retrieving memory info: ", err.Error())
 		}
 
-		memoryInfoJSON, err := json.Marshal(memoryInfo)
-
-		if err != nil {
-			log.Error("Error marshalling memory info: ", err.Error())
+		data, ok := memoryInfo.([]byte)
+		if !ok {
+			log.Error("Error converting memory info to bytes")
 			return nil, err
 		}
 
-		resourceSummary, err := os.Create(vmMemoryLogFile)
-
+		err = os.WriteFile(vmMemoryLogFile, data, 0644)
 		if err != nil {
-			log.Error("Error creating file: ", vmMemoryLogFile)
+			log.Error("Error writing memory info: ", err.Error())
 			return nil, err
 		}
-
-		if _, err = io.Copy(resourceSummary, bytes.NewReader(memoryInfoJSON)); err != nil {
-			log.Error(err)
-		}
+		//meminfo
 
 		filesToZip = append(filesToZip, vmMemoryLogFile)
 		//meminfo
@@ -875,6 +878,23 @@ func runVM() ([]string, error) {
 	return filesToZip, nil
 }
 
+func getResourceAndMarshall(functionName func() (interface{}, error), resourceType string) (interface{}, error) {
+	resource, err := functionName()
+	if err != nil {
+		log.Error("Error retrieving ", resourceType, " info: ", err.Error())
+		return nil, err
+	}
+
+	infoJSON, err := json.Marshal(resource)
+
+	if err != nil {
+		log.Error("Error marshalling memory info: ", err.Error())
+		return nil, err
+	}
+
+	return infoJSON, nil
+
+}
 func collectAndLimitLog(envars, configKey string) string {
 
 	splitEnvars := strings.Split(envars, "\n")
@@ -1263,7 +1283,24 @@ func roundToTwoDecimals(num float64) float64 {
 	return math.Round(num*100) / 100
 }
 
-func RetrieveVMMemoryInfo() (MemoryInfo, error) {
+func RetrieveVMCPUInfo() (interface{}, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+	defer cancel()
+
+	cpuinfo, err := cpu.InfoWithContext(ctx)
+	if err != nil {
+		fmt.Println("Error: ", err.Error())
+		return CPUInfo{}, err
+	}
+
+	return CPUInfo{
+		CPU:   len(cpuinfo),
+		Cores: cpuinfo[0].Cores,
+	}, nil
+}
+
+func RetrieveVMMemoryInfo() (interface{}, error) {
 	bytesToGB := 1024.0 * 1024.0 * 1024.0
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
