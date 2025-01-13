@@ -960,7 +960,7 @@ func getConfigValue(entry string) string {
 	return strings.Trim(aEntry[1], " ")
 }
 
-//Returns total length of byte array
+// Returns total length of byte array
 func getFileLength(logPath string) int64 {
 	log.Info("Getting log length for: ", logPath)
 	size := int64(0)
@@ -1167,6 +1167,11 @@ func writeFiles(filesToWrite []string) error {
 	}
 
 	log.Info("Diagnostics have been written to: ", output.Name())
+	err = cleanupFiles(filesToWrite)
+
+	if err != nil {
+		log.Error(err)
+	}
 
 	return nil
 }
@@ -1211,6 +1216,24 @@ func addToArchive(tw *tar.Writer, filename string) error {
 	_, err = io.Copy(tw, file)
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func cleanupFiles(filesToCleanup []string) error {
+	var failed bool
+
+	for _, file := range filesToCleanup {
+		err := os.Remove(file)
+		if err != nil {
+			log.Error("Error removing file: ", file)
+			failed = true
+			continue
+		}
+	}
+	if failed {
+		return errors.New("Some files could not be removed and may require manual deletion")
 	}
 
 	return nil
