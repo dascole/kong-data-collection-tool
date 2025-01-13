@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"math"
 
 	//"crypto/tls"
 	//"crypto/x509"
@@ -45,6 +46,7 @@ import (
 	"github.com/kong/deck/state"
 	"github.com/kong/deck/utils"
 	"github.com/kong/go-kong/kong"
+	"github.com/shirou/gopsutil/mem"
 	"github.com/spf13/cobra"
 
 	"github.com/pkg/errors"
@@ -74,6 +76,7 @@ const (
 	Kubernetes       = "kubernetes"
 	VM               = "vm"
 	LineLimitDefault = int64(1000)
+	vmMemoryLogFile  = "vm-resource-summary.txt"
 )
 
 var (
@@ -100,6 +103,13 @@ type Summary struct {
 	Vitals   string
 	DBMode   string
 	Platform string
+}
+
+type MemoryInfo struct {
+	PhysicalTotal     float64
+	PhysicalAvailable float64
+	SwapTotal         float64
+	SwapFree          float64
 }
 
 type PortForwardAPodRequest struct {
@@ -810,6 +820,7 @@ func runVM() ([]string, error) {
 
 		log.Info("Writing kong environment data...")
 
+		// mem info
 		if _, err = io.Copy(configSummary, bytes.NewReader(d)); err != nil {
 			log.Error(err)
 		}
@@ -820,6 +831,33 @@ func runVM() ([]string, error) {
 			log.Error("Error closing vm-kong-env.txt")
 			return nil, err
 		}
+
+		memoryInfo, err := RetrieveVMMemoryInfo()
+
+		if err != nil {
+			log.Error("Error retrieving memory info: ", err.Error())
+		}
+
+		memoryInfoJSON, err := json.Marshal(memoryInfo)
+
+		if err != nil {
+			log.Error("Error marshalling memory info: ", err.Error())
+			return nil, err
+		}
+
+		resourceSummary, err := os.Create(vmMemoryLogFile)
+
+		if err != nil {
+			log.Error("Error creating file: ", vmMemoryLogFile)
+			return nil, err
+		}
+
+		if _, err = io.Copy(resourceSummary, bytes.NewReader(memoryInfoJSON)); err != nil {
+			log.Error(err)
+		}
+
+		filesToZip = append(filesToZip, vmMemoryLogFile)
+		//meminfo
 
 		//Config keys that have the paths to log files that need extracting
 		configKeys := []string{"admin_access_log", "admin_error_log", "proxy_access_log", "proxy_error_log"}
@@ -1219,6 +1257,35 @@ func addToArchive(tw *tar.Writer, filename string) error {
 	}
 
 	return nil
+}
+
+func roundToTwoDecimals(num float64) float64 {
+	return math.Round(num*100) / 100
+}
+
+func RetrieveVMMemoryInfo() (MemoryInfo, error) {
+	bytesToGB := 1024.0 * 1024.0 * 1024.0
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+	defer cancel()
+
+	memInfo, err := mem.VirtualMemoryWithContext(ctx)
+	if err != nil {
+		return MemoryInfo{}, err
+	}
+
+	swapMem, err := mem.SwapMemory()
+
+	if err != nil {
+		return MemoryInfo{}, err
+	}
+
+	return MemoryInfo{
+		PhysicalTotal:     roundToTwoDecimals(float64(memInfo.Total) / bytesToGB),
+		PhysicalAvailable: roundToTwoDecimals(float64(memInfo.Available) / bytesToGB),
+		SwapTotal:         roundToTwoDecimals(float64(swapMem.Total) / bytesToGB),
+		SwapFree:          roundToTwoDecimals(float64(swapMem.Free) / bytesToGB),
+	}, nil
 }
 
 func cleanupFiles(filesToCleanup []string) error {
