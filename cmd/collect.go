@@ -47,6 +47,7 @@ import (
 	"github.com/kong/deck/utils"
 	"github.com/kong/go-kong/kong"
 	"github.com/shirou/gopsutil/cpu"
+	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 	"github.com/spf13/cobra"
 
@@ -118,6 +119,13 @@ type MemoryInfo struct {
 type CPUInfo struct {
 	CPU   int
 	Cores int32
+}
+
+type DiskInfo struct {
+	Total       uint64
+	Free        uint64
+	Used        uint64
+	UsedPercent float64
 }
 
 type PortForwardAPodRequest struct {
@@ -878,11 +886,30 @@ func runVM() ([]string, error) {
 			log.Error("Error writing memory info: ", err.Error())
 			return nil, err
 		}
-		//meminfo
 
 		filesToZip = append(filesToZip, vmCPULogFile)
 		//cpuinfo
 
+		diskInfo, err := getResourceAndMarshall(RetrieveVMDiskInfo, "disk")
+
+		if err != nil {
+			log.Error("Error retrieving disk info: ", err.Error())
+		}
+
+		data, ok = diskInfo.([]byte)
+
+		if !ok {
+			log.Error("Error converting disk info to bytes")
+			return nil, err
+		}
+
+		err = os.WriteFile(vmDiskLogFile, data, 0644)
+		if err != nil {
+			log.Error("Error writing disk info: ", err.Error())
+			return nil, err
+		}
+
+		filesToZip = append(filesToZip, vmDiskLogFile)
 		//Config keys that have the paths to log files that need extracting
 		configKeys := []string{"admin_access_log", "admin_error_log", "proxy_access_log", "proxy_error_log"}
 
@@ -1302,6 +1329,25 @@ func addToArchive(tw *tar.Writer, filename string) error {
 
 func roundToTwoDecimals(num float64) float64 {
 	return math.Round(num*100) / 100
+}
+
+func RetrieveVMDiskInfo() (interface{}, error) {
+	var bytesToGB uint64
+	bytesToGB = 1024 * 1024 * 1024
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+	defer cancel()
+
+	diskinfo, err := disk.UsageWithContext(ctx, "/")
+	if err != nil {
+		return DiskInfo{}, err
+	}
+	return DiskInfo{
+		Total:       diskinfo.Total / bytesToGB,
+		Free:        diskinfo.Free / 1024 / 1024 / 1024,
+		Used:        diskinfo.Used / 1024 / 1024 / 1024,
+		UsedPercent: diskinfo.UsedPercent,
+	}, nil
 }
 
 func RetrieveVMCPUInfo() (interface{}, error) {
