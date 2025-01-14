@@ -21,6 +21,7 @@ jobs:
         run: | 
           go mod tidy
           CGO_ENABLED=0 go build -ldflags="-s -w -extldflags '-static'" -o dct
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -extldflags '-static'" -o dct-darwin-arm64
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -extldflags '-static'" -o dct-linux-arm64
 
       - name: Install UPX
@@ -42,4 +43,11 @@ jobs:
       - name: Upload Compressed Linux Binary
         uses: actions/upload-artifact@v4
         with:
-          name: ./dct-linux-arm64
+          name: compressed-dct-linux-arm64-binary
+          path: ./dct-linux-arm64
+
+      - name: Upload Compressed Mac Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: compressed-dct-darwin-arm64-binary
+          path: ./dct-darwin-arm64
