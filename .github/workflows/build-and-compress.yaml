@@ -21,7 +21,6 @@ jobs:
         run: | 
           go mod tidy
           CGO_ENABLED=0 go build -ldflags="-s -w -extldflags '-static'" -o dct
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -extldflags '-static'" -o dct-darwin-arm64
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -extldflags '-static'" -o dct-linux-arm64
 
       - name: Install UPX
@@ -32,7 +31,6 @@ jobs:
       - name: Compress Binary
         run: | 
           upx --best --lzma ./dct
-          upx --best --lzma ./dct-darwin-arm64
           upx --best --lzma ./dct-linux-arm64
 
       - name: Upload Compressed Binary
@@ -40,11 +38,6 @@ jobs:
         with:
           name: compressed-dct-binary
           path: ./dct
-
-      - name: Upload Compressed Darwin Binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ./dct-darwin-arm64
 
       - name: Upload Compressed Linux Binary
         uses: actions/upload-artifact@v4
