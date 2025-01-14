@@ -49,6 +49,7 @@ import (
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
+	"github.com/shirou/gopsutil/process"
 	"github.com/spf13/cobra"
 
 	"github.com/pkg/errors"
@@ -81,6 +82,7 @@ const (
 	vmMemoryLogFile  = "vm-memory-summary.json"
 	vmCPULogFile     = "vm-cpu-summary.json"
 	vmDiskLogFile    = "vm-disk-summary.json"
+	vmProcessLogFile = "vm-process-summary.json"
 )
 
 var (
@@ -128,6 +130,13 @@ type DiskInfo struct {
 	UsedPercent float64
 }
 
+type ProcessInfo struct {
+	Name       string
+	PID        int32
+	CPUPercent string
+	MemPercent uint64
+	CmdLine    string
+}
 type PortForwardAPodRequest struct {
 	// RestConfig is the kubernetes config
 	RestConfig *rest.Config
@@ -890,6 +899,7 @@ func runVM() ([]string, error) {
 		filesToZip = append(filesToZip, vmCPULogFile)
 		//cpuinfo
 
+		//diskinfo
 		diskInfo, err := getResourceAndMarshall(RetrieveVMDiskInfo, "disk")
 
 		if err != nil {
@@ -910,6 +920,31 @@ func runVM() ([]string, error) {
 		}
 
 		filesToZip = append(filesToZip, vmDiskLogFile)
+		//diskinfo
+
+		//processinfo
+		processInfo, err := getResourceAndMarshall(RetrieveProcessInfo, "process")
+
+		if err != nil {
+			log.Error("Error retrieving process info: ", err.Error())
+		}
+
+		data, ok = processInfo.([]byte)
+
+		if !ok {
+			log.Error("Error converting process info to bytes")
+			return nil, err
+		}
+
+		err = os.WriteFile(vmProcessLogFile, data, 0644)
+		if err != nil {
+			log.Error("Error writing process info: ", err.Error())
+			return nil, err
+		}
+
+		filesToZip = append(filesToZip, vmProcessLogFile)
+		//processinfo
+
 		//Config keys that have the paths to log files that need extracting
 		configKeys := []string{"admin_access_log", "admin_error_log", "proxy_access_log", "proxy_error_log"}
 
@@ -1329,6 +1364,50 @@ func addToArchive(tw *tar.Writer, filename string) error {
 
 func roundToTwoDecimals(num float64) float64 {
 	return math.Round(num*100) / 100
+}
+
+func RetrieveProcessInfo() (interface{}, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ps := []ProcessInfo{}
+	processes, err := process.ProcessesWithContext(ctx)
+
+	if err != nil {
+		return ProcessInfo{}, err
+	}
+
+	for _, p := range processes {
+		name, err := p.NameWithContext(ctx)
+		if err != nil {
+			return ProcessInfo{}, err
+		}
+
+		pid := p.Pid
+		cpuPercent, err := p.CPUPercentWithContext(ctx)
+		if err != nil {
+			return ProcessInfo{}, err
+		}
+
+		memInfo, err := p.MemoryInfoWithContext(ctx)
+		if err != nil {
+			return ProcessInfo{}, err
+		}
+
+		cmdLine, err := p.CmdlineWithContext(ctx)
+		if err != nil {
+			return ProcessInfo{}, err
+		}
+
+		ps = append(ps, ProcessInfo{
+			PID:        pid,
+			Name:       name,
+			CPUPercent: fmt.Sprintf("%.2f", cpuPercent),
+			MemPercent: memInfo.RSS,
+			CmdLine:    cmdLine,
+		})
+	}
+	return ps, nil
 }
 
 func RetrieveVMDiskInfo() (interface{}, error) {
