@@ -857,89 +857,32 @@ func runVM() ([]string, error) {
 		}
 
 		//meminfo
-		memoryInfo, err := getResourceAndMarshall(RetrieveVMMemoryInfo, "memory")
-
-		if err != nil {
+		if err := getResourceAndMarshall(RetrieveVMMemoryInfo, "memory", vmMemoryLogFile); err != nil {
 			log.Error("Error retrieving memory info: ", err.Error())
 		}
 
-		data, ok := memoryInfo.([]byte)
-		if !ok {
-			log.Error("Error converting memory info to bytes")
-
-			return nil, err
-		}
-
-		err = os.WriteFile(vmMemoryLogFile, data, 0644)
-		if err != nil {
-			log.Error("Error writing memory info: ", err.Error())
-			return nil, err
-		}
 		filesToZip = append(filesToZip, vmMemoryLogFile)
 		//meminfo
 
 		//cpuinfo
-		cpuInfo, err := getResourceAndMarshall(RetrieveVMCPUInfo, "cpu")
-
-		if err != nil {
+		if err := getResourceAndMarshall(RetrieveVMCPUInfo, "cpu", vmCPULogFile); err != nil {
 			log.Error("Error retrieving CPU info: ", err.Error())
-		}
-
-		data, ok = cpuInfo.([]byte)
-		if !ok {
-			log.Error("Error converting CPU info to bytes")
-			return nil, err
-		}
-		err = os.WriteFile(vmCPULogFile, data, 0644)
-		if err != nil {
-			log.Error("Error writing memory info: ", err.Error())
-			return nil, err
 		}
 
 		filesToZip = append(filesToZip, vmCPULogFile)
 		//cpuinfo
 
 		//diskinfo
-		diskInfo, err := getResourceAndMarshall(RetrieveVMDiskInfo, "disk")
-
-		if err != nil {
+		if err := getResourceAndMarshall(RetrieveVMDiskInfo, "disk", vmDiskLogFile); err != nil {
 			log.Error("Error retrieving disk info: ", err.Error())
-		}
-
-		data, ok = diskInfo.([]byte)
-
-		if !ok {
-			log.Error("Error converting disk info to bytes")
-			return nil, err
-		}
-
-		err = os.WriteFile(vmDiskLogFile, data, 0644)
-		if err != nil {
-			log.Error("Error writing disk info: ", err.Error())
-			return nil, err
 		}
 
 		filesToZip = append(filesToZip, vmDiskLogFile)
 		//diskinfo
 
 		//processinfo
-		processInfo, err := getResourceAndMarshall(RetrieveProcessInfo, "process")
-
-		if err != nil {
+		if err := getResourceAndMarshall(RetrieveProcessInfo, "process", vmProcessLogFile); err != nil {
 			log.Error("Error retrieving process info: ", err.Error())
-		}
-
-		data, ok = processInfo.([]byte)
-
-		if !ok {
-			log.Error("Error converting process info to bytes")
-			return nil, err
-		}
-
-		err = os.WriteFile(vmProcessLogFile, data, 0644)
-		if err != nil {
-			log.Error("Error writing process info: ", err.Error())
-			return nil, err
 		}
 
 		filesToZip = append(filesToZip, vmProcessLogFile)
@@ -961,23 +904,30 @@ func runVM() ([]string, error) {
 	return filesToZip, nil
 }
 
-func getResourceAndMarshall(functionName func() (interface{}, error), resourceType string) (interface{}, error) {
+func getResourceAndMarshall(functionName func() (interface{}, error), resourceType string, logFile string) error {
 	resource, err := functionName()
 	if err != nil {
 		log.Error("Error retrieving ", resourceType, " info: ", err.Error())
-		return nil, err
+		return err
 	}
 
 	infoJSON, err := json.Marshal(resource)
 
 	if err != nil {
 		log.Error("Error marshalling memory info: ", err.Error())
-		return nil, err
+		return err
 	}
 
-	return infoJSON, nil
+	err = os.WriteFile(logFile, infoJSON, 0644)
+	if err != nil {
+		log.Error("Error writing process info: ", err.Error())
+		return err
+	}
+
+	return nil
 
 }
+
 func collectAndLimitLog(envars, configKey string) string {
 
 	splitEnvars := strings.Split(envars, "\n")
