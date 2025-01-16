@@ -85,6 +85,8 @@ const (
 	vmDiskLogFile    = "vm-disk-summary.json"
 	vmProcessLogFile = "vm-process-summary.json"
 	vmNetworkLogFile = "vm-network-summary.json"
+	vmHostsFile      = "vm-hosts"
+	vmResolvFile     = "vm-resolv.conf"
 )
 
 var (
@@ -840,6 +842,11 @@ func runVM() ([]string, error) {
 
 	var filesToZip []string
 
+	filesToCopy := [][2]string{
+		{"/etc/resolv.conf", vmResolvFile},
+		{"/etc/hosts", vmHostsFile},
+	}
+
 	if prefixDir != "" {
 		log.Info("Reading environment file...")
 
@@ -909,6 +916,13 @@ func runVM() ([]string, error) {
 
 		filesToZip = append(filesToZip, vmNetworkLogFile)
 		//networkinfo
+
+		for _, v := range filesToCopy {
+			if err := copyFiles(v[0], v[1]); err != nil {
+				log.Error("Error copying file: ", err.Error())
+			}
+			filesToZip = append(filesToZip, v[1])
+		}
 
 		//Config keys that have the paths to log files that need extracting
 		configKeys := []string{"admin_access_log", "admin_error_log", "proxy_access_log", "proxy_error_log"}
@@ -1468,6 +1482,32 @@ func RetrieveVMMemoryInfo() (interface{}, error) {
 		SwapTotal:         roundToTwoDecimals(float64(swapMem.Total) / bytesToGB),
 		SwapFree:          roundToTwoDecimals(float64(swapMem.Free) / bytesToGB),
 	}, nil
+}
+
+func copyFiles(srcFile string, dstFile string) error {
+	sourceFile, err := os.Open(srcFile)
+	if err != nil {
+		log.Error("Error opening source file: ", err)
+		return err
+	}
+
+	defer sourceFile.Close()
+
+	destinationFile, err := os.Create(dstFile)
+	if err != nil {
+		log.Error("Error creating destination file: ", err)
+		return err
+	}
+
+	defer destinationFile.Close()
+
+	_, err = io.Copy(destinationFile, sourceFile)
+	if err != nil {
+		log.Error("Error copying file: ", err)
+		return err
+	}
+
+	return nil
 }
 
 func cleanupFiles(filesToCleanup []string) error {
