@@ -50,6 +50,7 @@ import (
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 	"github.com/shirou/gopsutil/process"
+	"github.com/shirou/gopsutil/v4/net"
 	"github.com/spf13/cobra"
 
 	"github.com/pkg/errors"
@@ -83,6 +84,7 @@ const (
 	vmCPULogFile     = "vm-cpu-summary.json"
 	vmDiskLogFile    = "vm-disk-summary.json"
 	vmProcessLogFile = "vm-process-summary.json"
+	vmNetworkLogFile = "vm-network-summary.json"
 )
 
 var (
@@ -137,6 +139,18 @@ type ProcessInfo struct {
 	MemPercent uint64
 	CmdLine    string
 }
+
+type NetworkInfo struct {
+	Fd     uint32  `json:"fd"`
+	Family uint32  `json:"family"`
+	Type   uint32  `json:"type"`
+	Laddr  string  `json:"localaddr"`
+	Raddr  string  `json:"remoteaddr"`
+	Status string  `json:"status"`
+	Uids   []int32 `json:"uids"`
+	Pid    int32   `json:"pid"`
+}
+
 type PortForwardAPodRequest struct {
 	// RestConfig is the kubernetes config
 	RestConfig *rest.Config
@@ -888,6 +902,14 @@ func runVM() ([]string, error) {
 		filesToZip = append(filesToZip, vmProcessLogFile)
 		//processinfo
 
+		//networkinfo
+		if err := getResourceAndMarshall(RetrieveNetworkInfo, "network", vmNetworkLogFile); err != nil {
+			log.Error("Error retrieving network info: ", err.Error())
+		}
+
+		filesToZip = append(filesToZip, vmNetworkLogFile)
+		//networkinfo
+
 		//Config keys that have the paths to log files that need extracting
 		configKeys := []string{"admin_access_log", "admin_error_log", "proxy_access_log", "proxy_error_log"}
 
@@ -1314,6 +1336,33 @@ func addToArchive(tw *tar.Writer, filename string) error {
 
 func roundToTwoDecimals(num float64) float64 {
 	return math.Round(num*100) / 100
+}
+
+func RetrieveNetworkInfo() (interface{}, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	netStats := []NetworkInfo{}
+	conn, err := net.ConnectionsWithContext(ctx, "all")
+
+	if err != nil {
+		return NetworkInfo{}, err
+	}
+
+	for _, v := range conn {
+		netStats = append(netStats, NetworkInfo{
+			Fd:     v.Fd,
+			Family: v.Family,
+			Type:   v.Type,
+			Laddr:  v.Laddr.IP,
+			Raddr:  v.Raddr.IP,
+			Status: v.Status,
+			Pid:    v.Pid,
+			Uids:   v.Uids,
+		})
+	}
+
+	return netStats, err
 }
 
 func RetrieveProcessInfo() (interface{}, error) {
