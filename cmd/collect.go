@@ -40,11 +40,12 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
-	"github.com/kong/deck/dump"
-	"github.com/kong/deck/file"
-	"github.com/kong/deck/state"
-	"github.com/kong/deck/utils"
+	"github.com/kong/go-database-reconciler/pkg/dump"
+	"github.com/kong/go-database-reconciler/pkg/file"
+	"github.com/kong/go-database-reconciler/pkg/state"
+	"github.com/kong/go-database-reconciler/pkg/utils"
 	"github.com/kong/go-kong/kong"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
@@ -294,7 +295,7 @@ func guessRuntime() (string, error) {
 		errList = append(errList, err.Error())
 	}
 
-	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{})
+	containers, err := cli.ContainerList(ctx, container.ListOptions{})
 
 	if err != nil {
 		errList = append(errList, err.Error())
@@ -375,7 +376,7 @@ func runDocker() ([]string, error) {
 		return nil, err
 	}
 
-	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{})
+	containers, err := cli.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		log.Error("Unable to get container list from docker api", err.Error())
 		return nil, err
@@ -453,13 +454,13 @@ func runDocker() ([]string, error) {
 				logsSinceDocker = os.Getenv("DOCKER_LOGS_SINCE")
 			}
 
-			options := types.ContainerLogsOptions{}
+			options := container.LogsOptions{}
 
 			if logsSinceDocker != "" {
-				options = types.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Since: logsSinceDocker, Details: true}
+				options = container.LogsOptions{ShowStdout: true, ShowStderr: true, Since: logsSinceDocker, Details: true}
 			} else {
 				strLineLimit := strconv.Itoa(int(lineLimit))
-				options = types.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Tail: strLineLimit, Details: true}
+				options = container.LogsOptions{ShowStdout: true, ShowStderr: true, Tail: strLineLimit, Details: true}
 			}
 
 			logs, err := cli.ContainerLogs(ctx, c.ID, options)
@@ -564,10 +565,12 @@ func getKDD() ([]string, error) {
 	}
 
 	client, err := utils.GetKongClient(utils.KongClientConfig{
-		Address:       kongAddr,
-		TLSSkipVerify: true,
-		Debug:         false,
-		Headers:       deckHeaders,
+		Address: kongAddr,
+		TLSConfig: utils.TLSConfig{
+			SkipVerify: true,
+		},
+		Debug:   false,
+		Headers: deckHeaders,
 	})
 
 	if err != nil {
