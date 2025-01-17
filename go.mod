@@ -5,7 +5,7 @@ go 1.22.0
 require (
 	github.com/docker/docker v27.4.0+incompatible
 	github.com/kong/deck v1.12.0
-	github.com/kong/go-kong v0.29.0
+	github.com/kong/go-kong v0.60.0
 	github.com/pkg/errors v0.9.1
 	github.com/shirou/gopsutil v3.21.11+incompatible
 	github.com/shirou/gopsutil/v4 v4.24.12
@@ -56,6 +56,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/kong/semver/v4 v4.0.1 // indirect
 	github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de // indirect
 	github.com/lufia/plan9stats v0.0.0-20220326011226-f1430873d8db // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
@@ -74,7 +75,7 @@ require (
 	github.com/shirou/gopsutil/v3 v3.22.4 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/ssgelm/cookiejarparser v1.0.1 // indirect
-	github.com/tidwall/gjson v1.14.1 // indirect
+	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
