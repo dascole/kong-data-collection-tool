@@ -659,8 +659,9 @@ func getKDD() ([]string, error) {
 					log.Errorf("building Kong dump state: %w", err)
 				}
 				err = file.KongStateToFile(ks, file.WriteConfig{
-					Filename:   ws.Name + "-kong-dump.yaml",
-					FileFormat: file.YAML,
+					KongVersion: summaryInfo.KongVersion,
+					Filename:    ws.Name + "-kong-dump.yaml",
+					FileFormat:  file.YAML,
 				})
 				if err != nil {
 					log.Errorf("building Kong dump file: %w", err)
