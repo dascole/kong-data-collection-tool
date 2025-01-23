@@ -58,5 +58,5 @@ jobs:
       - name: Upload Compressed Windows Binary
         uses: actions/upload-artifact@v4
         with:
-          name: compressed-dct-darwin-arm64-binary
+          name: compressed-dct-windows-arm64-binary
           path: ./dct-win-amd64.exe
