@@ -33,7 +33,7 @@ jobs:
       - name: Compress Binary
         run: | 
           upx --best --lzma ./dct
-          upx --best --lzma dct-darwin-arm64 --force-macos
+          upx --best --lzma ./dct-darwin-arm64 --force-macos
           upx --best --lzma ./dct-linux-arm64
           upx --best --lzma ./dct-win-amd64.exe
 
