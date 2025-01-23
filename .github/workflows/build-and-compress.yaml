@@ -1,7 +1,9 @@
 name: Build and compress DCT binary
 
 on:
-  workflow_dispatch: 
+  push:
+    branches:
+      - master 
 
 jobs:
   build: 
