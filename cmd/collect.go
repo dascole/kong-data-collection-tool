@@ -820,7 +820,7 @@ func runKubernetes() ([]string, error) {
 		for _, pod := range kongK8sPods {
 			for _, container := range pod.Spec.Containers {
 				for _, v := range filesToCopy {
-					err = copyFilesk8s(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, v[0], v[1])
+					err = copyFilesk8s(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, v[0], v[1], "cat")
 					if err != nil {
 						log.Error("Error copying file: ", err.Error())
 					}
@@ -1544,7 +1544,7 @@ func copyFiles(srcFile string, dstFile string) error {
 
 func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
 	namespace string, pod string,
-	container string, srcFile string, dstFile string) error {
+	container string, srcFile string, dstFile string, cmd string) error {
 	exe, err := os.Executable()
 
 	if err != nil {
@@ -1561,7 +1561,7 @@ func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
 		Namespace(namespace).
 		SubResource("exec").
 		Param("container", container).
-		Param("command", "cat").
+		Param("command", cmd).
 		Param("command", srcFile).
 		Param("stdin", "false").
 		Param("stdout", "true").
