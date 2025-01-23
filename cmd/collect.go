@@ -26,6 +26,7 @@ import (
 	"compress/gzip"
 	"context"
 	"math"
+	"path/filepath"
 
 	//"crypto/tls"
 	//"crypto/x509"
@@ -70,6 +71,7 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 
 	// netv1 "k8s.io/api/networking/v1"
 	"github.com/stretchr/objx"
@@ -88,6 +90,11 @@ const (
 	vmNetworkLogFile = "vm-network-summary.json"
 	vmHostsFile      = "vm-hosts"
 	vmResolvFile     = "vm-resolv.conf"
+	k8ResolvFile     = "k8-resolv.conf"
+	k8HostsFile      = "k8-hosts"
+	k8sOSReleaseFile = "k8-os-release"
+	k8sCpuInfoFile   = "k8-cpu-info"
+	k8sMemInfoFile   = "k8-mem-info"
 )
 
 var (
@@ -318,7 +325,7 @@ func guessRuntime() (string, error) {
 
 	var kongK8sPods []string
 
-	kubeClient, err := createClient()
+	kubeClient, _, err := createClient()
 
 	if err != nil {
 		errList = append(errList, err.Error())
@@ -749,7 +756,16 @@ func runKubernetes() ([]string, error) {
 	var kongK8sPods []corev1.Pod
 	var filesToZip []string
 
-	kubeClient, err := createClient()
+	filesToCopy := [][2]string{
+		{"/etc/resolv.conf", k8ResolvFile},
+		{"/etc/hosts", k8HostsFile},
+		{"/etc/os-release", k8sOSReleaseFile},
+		{"/proc/meminfo", k8sMemInfoFile},
+		{"/proc/cpuinfo", k8sCpuInfoFile},
+	}
+
+	kubeClient, clientConfig, err := createClient()
+
 	if err != nil {
 		log.Error("Unable to create k8s client")
 		return nil, err
@@ -800,6 +816,18 @@ func runKubernetes() ([]string, error) {
 
 	if len(kongK8sPods) > 0 {
 		logFilenames, err := writePodDetails(ctx, kubeClient, kongK8sPods)
+
+		for _, pod := range kongK8sPods {
+			for _, container := range pod.Spec.Containers {
+				for _, v := range filesToCopy {
+					err = copyFilesk8s(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, v[0], v[1])
+					if err != nil {
+						log.Error("Error copying file: ", err.Error())
+					}
+					filesToZip = append(filesToZip, v[1])
+				}
+			}
+		}
 
 		if err != nil {
 			log.Error("There was an error writing pod details: ", err.Error())
@@ -1106,20 +1134,20 @@ func getFileLength(logPath string) int64 {
 	return size
 }
 
-func createClient() (kubernetes.Interface, error) {
+func createClient() (kubernetes.Interface, *rest.Config, error) {
 	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{})
 
 	clientConfig, err := kubeConfig.ClientConfig()
 	if err != nil {
-		return nil, errors.Wrap(err, "error finding Kubernetes API server config in --kubeconfig, $KUBECONFIG, or in-cluster configuration")
+		return nil, nil, errors.Wrap(err, "error finding Kubernetes API server config in --kubeconfig, $KUBECONFIG, or in-cluster configuration")
 	}
 
 	clientSet, err := kubernetes.NewForConfig(clientConfig)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create a client: %v", err)
+		return nil, nil, fmt.Errorf("unable to create a client: %v", err)
 	}
 
-	return clientSet, nil
+	return clientSet, clientConfig, nil
 }
 
 func writePodDetails(ctx context.Context, clientSet kubernetes.Interface, podList []corev1.Pod) ([]string, error) {
@@ -1508,6 +1536,59 @@ func copyFiles(srcFile string, dstFile string) error {
 	_, err = io.Copy(destinationFile, sourceFile)
 	if err != nil {
 		log.Error("Error copying file: ", err)
+		return err
+	}
+
+	return nil
+}
+
+func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
+	namespace string, pod string,
+	container string, srcFile string, dstFile string) error {
+	exe, err := os.Executable()
+
+	if err != nil {
+		log.Error("Error getting executable path: ", err)
+	}
+
+	exePath := filepath.Dir(exe)
+	fmt.Printf("Executable path: %s\n", exePath)
+
+	req := clientset.CoreV1().RESTClient().
+		Post().
+		Resource("pods").
+		Name(pod).
+		Namespace(namespace).
+		SubResource("exec").
+		Param("container", container).
+		Param("command", "cat").
+		Param("command", srcFile).
+		Param("stdin", "false").
+		Param("stdout", "true").
+		Param("stderr", "true")
+
+	exec, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
+
+	if err != nil {
+		log.Error("Error creating executor")
+	}
+
+	var stdout, stderr bytes.Buffer
+	err = exec.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	if err != nil {
+		log.Warning("Error streaming stdout: ", err)
+
+	}
+
+	log.Info("Copying file: ", srcFile, " to: ", exePath+"/"+dstFile)
+	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
+
+	if err != nil {
+		log.Error("Error writing file: ", err)
 		return err
 	}
 
