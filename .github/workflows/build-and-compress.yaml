@@ -42,23 +42,23 @@ jobs:
       - name: Upload Compressed amd64 Binary
         uses: actions/upload-artifact@v4
         with:
-          name: compressed-dct-binary
+          name: dct-linux-amd64
           path: ./dct
 
       - name: Upload Compressed Linux arm64 Binary
         uses: actions/upload-artifact@v4
         with:
-          name: compressed-dct-linux-arm64-binary
+          name: dct-linux-arm64
           path: ./dct-linux-arm64
 
       - name: Upload Compressed Mac Binary
         uses: actions/upload-artifact@v4
         with:
-          name: compressed-dct-darwin-arm64-binary
+          name: dct-darwin-arm64
           path: ./dct-darwin-arm64
 
       - name: Upload Compressed Windows Binary
         uses: actions/upload-artifact@v4
         with:
-          name: compressed-dct-windows-arm64-binary
+          name: dct-win-amd64.exe
           path: ./dct-win-amd64.exe
