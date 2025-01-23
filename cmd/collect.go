@@ -820,11 +820,15 @@ func runKubernetes() ([]string, error) {
 		for _, pod := range kongK8sPods {
 			for _, container := range pod.Spec.Containers {
 				for _, v := range filesToCopy {
-					err = copyFilesk8s(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, v[0], v[1], "cat")
+					filename, err := copyFilesk8s(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, v[0], "cat")
+
 					if err != nil {
-						log.Error("Error copying file: ", err.Error())
+						log.Error("Error copying file: ", pod.Name, err.Error())
 					}
-					filesToZip = append(filesToZip, v[1])
+
+					if filename != "" {
+						filesToZip = append(filesToZip, filename)
+					}
 				}
 			}
 		}
@@ -1544,7 +1548,7 @@ func copyFiles(srcFile string, dstFile string) error {
 
 func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
 	namespace string, pod string,
-	container string, srcFile string, dstFile string, cmd string) error {
+	container string, srcFile string, cmd string) (string, error) {
 	exe, err := os.Executable()
 
 	if err != nil {
@@ -1581,18 +1585,19 @@ func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
 
 	if err != nil {
 		log.Warning("Error streaming stdout: ", err)
-
+		return "", err
 	}
 
+	dstFile := pod + "-" + container + "-" + strings.Replace(srcFile, "/", "-", -1)
 	log.Info("Copying file: ", srcFile, " to: ", exePath+"/"+dstFile)
 	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
 
 	if err != nil {
 		log.Error("Error writing file: ", err)
-		return err
+		return "", err
 	}
 
-	return nil
+	return dstFile, nil
 }
 
 func cleanupFiles(filesToCleanup []string) error {
