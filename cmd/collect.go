@@ -756,12 +756,15 @@ func runKubernetes() ([]string, error) {
 	var kongK8sPods []corev1.Pod
 	var filesToZip []string
 
-	filesToCopy := [][2]string{
-		{"/etc/resolv.conf", k8ResolvFile},
-		{"/etc/hosts", k8HostsFile},
-		{"/etc/os-release", k8sOSReleaseFile},
-		{"/proc/meminfo", k8sMemInfoFile},
-		{"/proc/cpuinfo", k8sCpuInfoFile},
+	filesToCopy := [][]string{
+		{"resolv.conf", "cat", "/etc/resolv.conf"},
+		{"hosts", "cat", "/etc/hosts"},
+		{"os-release", "cat", "/etc/os-release"},
+		{"meminfo", "cat", "/proc/meminfo"},
+		{"cpuinfo", "cat", "/proc/cpuinfo"},
+		{"top", "top", "-b", "-n", "1"},
+		{"dir-ls", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
+		{"ulimit", "sh", "-c", "ulimit", "-n"},
 	}
 
 	kubeClient, clientConfig, err := createClient()
@@ -819,8 +822,8 @@ func runKubernetes() ([]string, error) {
 
 		for _, pod := range kongK8sPods {
 			for _, container := range pod.Spec.Containers {
-				for _, v := range filesToCopy {
-					filename, err := copyFilesk8s(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, v[0], "cat")
+				for _, command := range filesToCopy {
+					filename, err := RunCommandInPod(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, command[0], command)
 
 					if err != nil {
 						log.Error("Error copying file: ", pod.Name, err.Error())
@@ -1546,9 +1549,9 @@ func copyFiles(srcFile string, dstFile string) error {
 	return nil
 }
 
-func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
+func RunCommandInPod(clientset kubernetes.Interface, config *rest.Config,
 	namespace string, pod string,
-	container string, srcFile string, cmd string) (string, error) {
+	container string, srcFile string, cmd []string) (string, error) {
 	exe, err := os.Executable()
 
 	if err != nil {
@@ -1565,11 +1568,18 @@ func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
 		Namespace(namespace).
 		SubResource("exec").
 		Param("container", container).
-		Param("command", cmd).
-		Param("command", srcFile).
 		Param("stdin", "false").
 		Param("stdout", "true").
 		Param("stderr", "true")
+	for i, c := range cmd {
+		if i == 0 {
+			continue
+		}
+		log.Info("Adding command: ", c)
+		req.Param("command", c)
+	}
+
+	// Param("command", srcFile).
 
 	exec, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
 
@@ -1590,14 +1600,14 @@ func copyFilesk8s(clientset kubernetes.Interface, config *rest.Config,
 
 	dstFile := pod + "-" + container + "-" + strings.Replace(srcFile, "/", "-", -1)
 	log.Info("Copying file: ", srcFile, " to: ", exePath+"/"+dstFile)
-	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
+	err = os.WriteFile(exePath+"/"+srcFile, stdout.Bytes(), 0644)
 
 	if err != nil {
 		log.Error("Error writing file: ", err)
 		return "", err
 	}
 
-	return dstFile, nil
+	return srcFile, nil
 }
 
 func cleanupFiles(filesToCleanup []string) error {
