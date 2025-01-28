@@ -1600,14 +1600,14 @@ func RunCommandInPod(clientset kubernetes.Interface, config *rest.Config,
 
 	dstFile := pod + "-" + container + "-" + strings.Replace(srcFile, "/", "-", -1)
 	log.Info("Copying file: ", srcFile, " to: ", exePath+"/"+dstFile)
-	err = os.WriteFile(exePath+"/"+srcFile, stdout.Bytes(), 0644)
+	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
 
 	if err != nil {
 		log.Error("Error writing file: ", err)
 		return "", err
 	}
 
-	return srcFile, nil
+	return dstFile, nil
 }
 
 func cleanupFiles(filesToCleanup []string) error {
