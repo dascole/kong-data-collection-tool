@@ -257,13 +257,13 @@ var collectCmd = &cobra.Command{
 }
 
 var (
-	defaultKongImageList = []string{"kong-gateway", "kubernetes-ingress-controller", "kuma-dp", "kuma-cp", "kuma-init"}
+	defaultKongImageList = []string{"kong-gateway", "kubernetes-ingress-controller"}
 )
 
 func init() {
 	rootCmd.AddCommand(collectCmd)
 	collectCmd.PersistentFlags().StringVarP(&rType, "runtime", "r", "", "Runtime to extract logs from (kubernetes or docker). Runtime is auto detected if omitted.")
-	collectCmd.PersistentFlags().StringSliceVarP(&kongImages, "target-images", "i", defaultKongImageList, `Override default gateway/mesh images to scrape logs from. Default: "kong-gateway","kubernetes-ingress-controller","kuma-dp","kuma-cp","kuma-init"`)
+	collectCmd.PersistentFlags().StringSliceVarP(&kongImages, "target-images", "i", defaultKongImageList, `Override default gateway images to scrape logs from. Default: "kong-gateway","kubernetes-ingress-controller"`)
 	collectCmd.PersistentFlags().StringSliceVarP(&deckHeaders, "rbac-header", "H", nil, "RBAC header required to contact the admin-api.")
 	collectCmd.PersistentFlags().StringVarP(&kongAddr, "kong-addr", "a", "http://localhost:8001", "The address to reach the admin-api of the Kong instance in question.")
 	collectCmd.PersistentFlags().BoolVarP(&createWorkspaceConfigDumps, "dump-workspace-configs", "d", false, "Deck dump workspace configs to yaml files. Default: false. NOTE: Will not work if --disable-kdd=true")
