@@ -656,6 +656,14 @@ func getKDD() ([]string, error) {
 			summaryInfo.TotalTargetCount += len(d.Targets)
 			summaryInfo.TotalUpstreamCount += len(d.Upstreams)
 
+			for _, v := range d.Routes {
+				for _, route := range v.Paths {
+					if strings.HasPrefix(*route, "~") {
+						summaryInfo.TotalRegExRoutes += 1
+					}
+				}
+			}
+
 			if ws.Config.Portal {
 				summaryInfo.TotalEnabledDevPortalCount += 1
 			}
@@ -1792,6 +1800,7 @@ type SummaryInfo struct {
 	TotalTargetCount           int    `json:"total_target_count"`
 	TotalUpstreamCount         int    `json:"total_upstream_count"`
 	TotalWorkspaceCount        int    `json:"total_workspace_count"`
+	TotalRegExRoutes           int    `json:"total_regex_route_count"`
 }
 
 type CustomMessage struct {
