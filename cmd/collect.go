@@ -187,6 +187,17 @@ var collectCmd = &cobra.Command{
 
 		var filesToZip []string
 
+		filesToCopy := [][]string{
+			{"resolv.conf", "cat", "/etc/resolv.conf"},
+			{"hosts", "cat", "/etc/hosts"},
+			{"os-release", "cat", "/etc/os-release"},
+			{"meminfo", "cat", "/proc/meminfo"},
+			{"cpuinfo", "cat", "/proc/cpuinfo"},
+			{"top", "top", "-b", "-n", "1"},
+			{"dir-ls", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
+			{"ulimit", "sh", "-c", "ulimit", "-n"},
+		}
+
 		if rType == "" {
 			rType = os.Getenv("KONG_RUNTIME")
 		}
@@ -210,7 +221,7 @@ var collectCmd = &cobra.Command{
 			}
 
 		case "kubernetes":
-			if k8sFilesToZip, err := runKubernetes(); err != nil {
+			if k8sFilesToZip, err := runKubernetes(filesToCopy); err != nil {
 				log.Error("Error with VM runtime collection: ", err.Error())
 			} else {
 				filesToZip = append(filesToZip, k8sFilesToZip...)
@@ -758,22 +769,11 @@ func getWorkspaces(client *kong.Client) (*Workspaces, error) {
 	return &w, nil
 }
 
-func runKubernetes() ([]string, error) {
+func runKubernetes(filesToCopy [][]string) ([]string, error) {
 	log.Info("Running Kubernetes")
 	ctx := context.Background()
 	var kongK8sPods []corev1.Pod
 	var filesToZip []string
-
-	filesToCopy := [][]string{
-		{"resolv.conf", "cat", "/etc/resolv.conf"},
-		{"hosts", "cat", "/etc/hosts"},
-		{"os-release", "cat", "/etc/os-release"},
-		{"meminfo", "cat", "/proc/meminfo"},
-		{"cpuinfo", "cat", "/proc/cpuinfo"},
-		{"top", "top", "-b", "-n", "1"},
-		{"dir-ls", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
-		{"ulimit", "sh", "-c", "ulimit", "-n"},
-	}
 
 	kubeClient, clientConfig, err := createClient()
 
