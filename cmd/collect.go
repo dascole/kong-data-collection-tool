@@ -188,14 +188,14 @@ var collectCmd = &cobra.Command{
 		var filesToZip []string
 
 		filesToCopy := [][]string{
-			{"resolv.conf", "cat", "/etc/resolv.conf"},
-			{"hosts", "cat", "/etc/hosts"},
-			{"os-release", "cat", "/etc/os-release"},
-			{"meminfo", "cat", "/proc/meminfo"},
-			{"cpuinfo", "cat", "/proc/cpuinfo"},
-			{"top", "top", "-b", "-n", "1"},
-			{"dir-ls", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
-			{"ulimit", "sh", "-c", "ulimit", "-n"},
+			{"resolv.conf", "file", "cat", "/etc/resolv.conf"},
+			{"hosts", "file", "cat", "/etc/hosts"},
+			{"os-release", "file", "cat", "/etc/os-release"},
+			{"meminfo", "file", "cat", "/proc/meminfo"},
+			{"cpuinfo", "file", "cat", "/proc/cpuinfo"},
+			{"top", "cmd", "top", "-b", "-n", "1"},
+			{"dir-ls", "cmd", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
+			{"ulimit", "cmd", "sh", "-c", "ulimit", "-n"},
 		}
 
 		if rType == "" {
@@ -1580,7 +1580,7 @@ func RunCommandInPod(clientset kubernetes.Interface, config *rest.Config,
 		Param("stdout", "true").
 		Param("stderr", "true")
 	for i, c := range cmd {
-		if i == 0 {
+		if i == 0 || i == 1 {
 			continue
 		}
 		log.Info("Adding command: ", c)
