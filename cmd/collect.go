@@ -187,16 +187,17 @@ var collectCmd = &cobra.Command{
 
 		var filesToZip []string
 
-		filesToCopy := [][]string{
-			{"resolv.conf", "file", "cat", "/etc/resolv.conf"},
-			{"hosts", "file", "cat", "/etc/hosts"},
-			{"os-release", "file", "cat", "/etc/os-release"},
-			{"meminfo", "file", "cat", "/proc/meminfo"},
-			{"cpuinfo", "file", "cat", "/proc/cpuinfo"},
-			{"top", "cmd", "top", "-b", "-n", "1"},
-			{"dir-ls", "cmd", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
-			{"ulimit", "cmd", "sh", "-c", "ulimit", "-n"},
+		filesToCopy := []string{
+			"/etc/resolv.conf",
+			"/etc/hosts",
+			"/etc/os-release",
 		}
+
+		// commandsToRun = [][]string{
+		// 	{"top", "cmd", "top", "-b", "-n", "1"},
+		// 	{"dir-ls", "cmd", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
+		// 	{"ulimit", "cmd", "sh", "-c", "ulimit", "-n"},
+		// }
 
 		if rType == "" {
 			rType = os.Getenv("KONG_RUNTIME")
@@ -769,7 +770,7 @@ func getWorkspaces(client *kong.Client) (*Workspaces, error) {
 	return &w, nil
 }
 
-func runKubernetes(filesToCopy [][]string) ([]string, error) {
+func runKubernetes(filesToCopy []string) ([]string, error) {
 	log.Info("Running Kubernetes")
 	ctx := context.Background()
 	var kongK8sPods []corev1.Pod
@@ -830,8 +831,8 @@ func runKubernetes(filesToCopy [][]string) ([]string, error) {
 
 		for _, pod := range kongK8sPods {
 			for _, container := range pod.Spec.Containers {
-				for _, command := range filesToCopy {
-					filename, err := RunCommandInPod(kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, command[0], command)
+				for _, file := range filesToCopy {
+					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, []string{"cat", file})
 
 					if err != nil {
 						log.Error("Error copying file: ", pod.Name, err.Error())
@@ -1557,9 +1558,14 @@ func copyFiles(srcFile string, dstFile string) error {
 	return nil
 }
 
-func RunCommandInPod(clientset kubernetes.Interface, config *rest.Config,
-	namespace string, pod string,
-	container string, srcFile string, cmd []string) (string, error) {
+func RunCommandInPod(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	config *rest.Config,
+	namespace string,
+	pod string,
+	container string,
+	cmd []string) (string, error) {
 	exe, err := os.Executable()
 
 	if err != nil {
@@ -1579,10 +1585,7 @@ func RunCommandInPod(clientset kubernetes.Interface, config *rest.Config,
 		Param("stdin", "false").
 		Param("stdout", "true").
 		Param("stderr", "true")
-	for i, c := range cmd {
-		if i == 0 || i == 1 {
-			continue
-		}
+	for _, c := range cmd {
 		log.Info("Adding command: ", c)
 		req.Param("command", c)
 	}
@@ -1606,8 +1609,8 @@ func RunCommandInPod(clientset kubernetes.Interface, config *rest.Config,
 		return "", err
 	}
 
-	dstFile := pod + "-" + container + "-" + strings.Replace(srcFile, "/", "-", -1)
-	log.Info("Copying file: ", srcFile, " to: ", exePath+"/"+dstFile)
+	dstFile := pod + "-" + container + "-" + strings.Replace(cmd[1], "/", "-", -1)
+	log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
 	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
 
 	if err != nil {
