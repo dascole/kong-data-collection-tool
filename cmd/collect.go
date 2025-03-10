@@ -193,11 +193,17 @@ var collectCmd = &cobra.Command{
 			"/etc/os-release",
 		}
 
-		// commandsToRun = [][]string{
+		// commandsToRun := [][]string{
 		// 	{"top", "cmd", "top", "-b", "-n", "1"},
 		// 	{"dir-ls", "cmd", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
 		// 	{"ulimit", "cmd", "sh", "-c", "ulimit", "-n"},
 		// }
+
+		commandsToRun := [][]string{
+			{"top", "-b", "-n", "1"},
+			{"ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
+			{"sh", "-c", "ulimit", "-n"},
+		}
 
 		if rType == "" {
 			rType = os.Getenv("KONG_RUNTIME")
@@ -222,7 +228,7 @@ var collectCmd = &cobra.Command{
 			}
 
 		case "kubernetes":
-			if k8sFilesToZip, err := runKubernetes(filesToCopy); err != nil {
+			if k8sFilesToZip, err := runKubernetes(filesToCopy, commandsToRun); err != nil {
 				log.Error("Error with VM runtime collection: ", err.Error())
 			} else {
 				filesToZip = append(filesToZip, k8sFilesToZip...)
@@ -770,7 +776,7 @@ func getWorkspaces(client *kong.Client) (*Workspaces, error) {
 	return &w, nil
 }
 
-func runKubernetes(filesToCopy []string) ([]string, error) {
+func runKubernetes(filesToCopy []string, commandsToRun [][]string) ([]string, error) {
 	log.Info("Running Kubernetes")
 	ctx := context.Background()
 	var kongK8sPods []corev1.Pod
@@ -833,6 +839,18 @@ func runKubernetes(filesToCopy []string) ([]string, error) {
 			for _, container := range pod.Spec.Containers {
 				for _, file := range filesToCopy {
 					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, []string{"cat", file})
+
+					if err != nil {
+						log.Error("Error copying file: ", pod.Name, err.Error())
+					}
+
+					if filename != "" {
+						filesToZip = append(filesToZip, filename)
+					}
+				}
+
+				for _, cmd := range commandsToRun {
+					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, cmd)
 
 					if err != nil {
 						log.Error("Error copying file: ", pod.Name, err.Error())
@@ -1609,7 +1627,7 @@ func RunCommandInPod(
 		return "", err
 	}
 
-	dstFile := pod + "-" + container + "-" + strings.Replace(cmd[1], "/", "-", -1)
+	dstFile := pod + "-" + container + "-" + strings.Replace(cmd[0], "/", "-", -1)
 	log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
 	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
 
