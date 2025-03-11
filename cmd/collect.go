@@ -1627,7 +1627,7 @@ func RunCommandInPod(
 		return "", err
 	}
 
-	dstFile := pod + "-" + container + "-" + strings.Replace(cmd[0], "/", "-", -1)
+	dstFile := pod + "-" + container + "-" + strings.Replace(cmd[0]+cmd[1], "/", "-", -1)
 	log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
 	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
 
