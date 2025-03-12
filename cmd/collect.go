@@ -221,7 +221,7 @@ var collectCmd = &cobra.Command{
 		switch rType {
 		case "docker":
 
-			if dockerFilesToZip, err := runDocker(); err != nil {
+			if dockerFilesToZip, err := runDocker(filesToCopy, commandsToRun); err != nil {
 				log.Error("Error with docker runtime collection: ", err.Error())
 			} else {
 				filesToZip = append(filesToZip, dockerFilesToZip...)
@@ -393,7 +393,7 @@ func guessRuntime() (string, error) {
 	return "", fmt.Errorf(strings.Join(errList, "\n"))
 }
 
-func runDocker() ([]string, error) {
+func runDocker(filesToCopy []string, commandsToRun [][]string) ([]string, error) {
 	ctx := context.Background()
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -422,6 +422,17 @@ func runDocker() ([]string, error) {
 	var filesToZip []string
 
 	for _, c := range kongContainers {
+		log.Info("Inspecting container: ", c.ID)
+
+		copiedFiles, err := CopyFilesFromContainers(ctx, cli, c.ID, filesToCopy)
+
+		if err != nil {
+			log.Error("Error copying files from container: ", err.Error())
+		}
+
+		log.Error("Files copied: ", copiedFiles)
+		filesToZip = append(filesToZip, copiedFiles...)
+
 		_, b, err := cli.ContainerInspectWithRaw(ctx, c.ID, false)
 		if err != nil {
 			log.Error("Unable to inspect container:", err.Error())
@@ -1593,6 +1604,58 @@ func WriteOutputToFile(filename string, data []byte) error {
 
 	return nil
 
+}
+
+func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerID string, files []string) (filesToWrite []string, err error) {
+	fmt.Println("Copying files from container: ", containerID)
+
+	for _, file := range files {
+		fmt.Println("Copying file: ", file)
+		reader, _, err := cli.CopyFromContainer(ctx, containerID, file)
+
+		if err != nil {
+			log.Error("Error copying file: ",
+				file, " from container: ", containerID, " error: ", err)
+			return nil, err
+		}
+
+		tarReader := tar.NewReader(reader)
+
+		for {
+			header, err := tarReader.Next()
+
+			if err == io.EOF {
+				break
+			}
+
+			if err != nil {
+				log.Error("Error reading tar file: ", err)
+				return nil, err
+			}
+
+			outFile, err := os.Create(header.Name)
+
+			if err != nil {
+				log.Error("Error creating file: ", err)
+				return nil, err
+			}
+
+			filesToWrite = append(filesToWrite, header.Name)
+
+			defer outFile.Close()
+
+			_, err = io.Copy(outFile, tarReader)
+
+			if err != nil {
+				log.Error("Error copying file: ",
+					header.Name, " from container: ", containerID, " error: ", err)
+				return nil, err
+
+			}
+		}
+
+	}
+	return filesToWrite, nil
 }
 
 func RunCommandInPod(
