@@ -1576,6 +1576,25 @@ func copyFiles(srcFile string, dstFile string) error {
 	return nil
 }
 
+func WriteOutputToFile(filename string, data []byte) error {
+	// err := os.Mkdir(directory, 0755)
+
+	// if err != nil && !os.IsExist(err) {
+	// 	log.Fatal(err)
+	// 	return err
+	// }
+
+	err := os.WriteFile(filename, data, 0644)
+
+	if err != nil {
+		log.Error("Error writing file: ", err)
+		return err
+	}
+
+	return nil
+
+}
+
 func RunCommandInPod(
 	ctx context.Context,
 	clientset kubernetes.Interface,
@@ -1627,10 +1646,10 @@ func RunCommandInPod(
 		return "", err
 	}
 
-	dstFile := pod + "-" + container + "-" + strings.Replace(cmd[0]+cmd[1], "/", "-", -1)
+	dstFile := container + "-" + strings.Replace(cmd[0]+cmd[1], "/", "-", -1)
 	log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
-	err = os.WriteFile(exePath+"/"+dstFile, stdout.Bytes(), 0644)
 
+	err = WriteOutputToFile(dstFile, stdout.Bytes())
 	if err != nil {
 		log.Error("Error writing file: ", err)
 		return "", err
