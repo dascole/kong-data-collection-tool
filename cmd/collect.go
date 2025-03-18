@@ -30,6 +30,7 @@ import (
 
 	//"crypto/tls"
 	//"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -192,12 +193,6 @@ var collectCmd = &cobra.Command{
 			"/etc/hosts",
 			"/etc/os-release",
 		}
-
-		// commandsToRun := [][]string{
-		// 	{"top", "cmd", "top", "-b", "-n", "1"},
-		// 	{"dir-ls", "cmd", "ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
-		// 	{"ulimit", "cmd", "sh", "-c", "ulimit", "-n"},
-		// }
 
 		commandsToRun := [][]string{
 			{"top", "-b", "-n", "1"},
@@ -430,8 +425,11 @@ func runDocker(filesToCopy []string, commandsToRun [][]string) ([]string, error)
 			log.Error("Error copying files from container: ", err.Error())
 		}
 
+		executedFiles, err := RunCommandsInContainer(ctx, cli, c.ID, commandsToRun)
+
 		log.Error("Files copied: ", copiedFiles)
 		filesToZip = append(filesToZip, copiedFiles...)
+		filesToZip = append(filesToZip, executedFiles...)
 
 		_, b, err := cli.ContainerInspectWithRaw(ctx, c.ID, false)
 		if err != nil {
@@ -1604,6 +1602,92 @@ func WriteOutputToFile(filename string, data []byte) error {
 
 	return nil
 
+}
+
+func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID string, cmd [][]string) (filesToWrite []string, err error) {
+	for _, c := range cmd {
+		log.Info("Running command: ", c)
+		config := container.ExecOptions{
+			Cmd:          c,
+			Tty:          false,
+			AttachStderr: false,
+			AttachStdout: true,
+			AttachStdin:  false,
+			Detach:       true,
+		}
+
+		execID, err := cli.ContainerExecCreate(ctx, containerID, config)
+
+		if err != nil {
+			log.Error("Error creating exec: ", err)
+			return nil, err
+		}
+
+		resp, err := cli.ContainerExecAttach(ctx, execID.ID, container.ExecStartOptions{})
+
+		defer resp.Close()
+
+		if err != nil {
+			log.Error("Error attaching to exec: ", err)
+			return nil, err
+		}
+
+		// _, err = io.Copy(os.Stdout, resp.Reader)
+		// if err != nil {
+		// 	log.Error("Error copying output: ", err)
+		// 	return nil, err
+		// }
+
+		// data, err := io.ReadAll(resp.Reader)
+		// if err != nil {
+		// 	log.Error("Error reading response: ", err)
+		// 	return nil, err
+		// }
+
+		output, err := decodeDockerMultiplexedStream(resp.Reader)
+		if err != nil {
+			log.Error("Error decoding multiplexed stream: ", err)
+			return nil, err
+		}
+
+		err = WriteOutputToFile(c[0]+c[1], output)
+		if err != nil {
+			log.Error("Error writing output to file: ", err)
+			return nil, err
+		}
+
+		filesToWrite = append(filesToWrite, c[0]+c[1])
+	}
+
+	return filesToWrite, nil
+}
+
+func decodeDockerMultiplexedStream(reader io.Reader) ([]byte, error) {
+	var output []byte
+	header := make([]byte, 8)
+
+	for {
+		_, err := reader.Read(header)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+
+		size := binary.BigEndian.Uint32(header[4:])
+
+		payload := make([]byte, size)
+		_, err = io.ReadFull(reader, payload)
+
+		if err != nil {
+			return nil, err
+		}
+
+		output = append(output, payload...)
+	}
+
+	return output, nil
 }
 
 func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerID string, files []string) (filesToWrite []string, err error) {
