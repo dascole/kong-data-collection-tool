@@ -25,18 +25,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"math"
-	"path/filepath"
-
-	//"crypto/tls"
-	//"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -49,34 +45,25 @@ import (
 	"github.com/kong/go-database-reconciler/pkg/state"
 	"github.com/kong/go-database-reconciler/pkg/utils"
 	"github.com/kong/go-kong/kong"
+	"github.com/pkg/errors"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 	"github.com/shirou/gopsutil/process"
 	"github.com/shirou/gopsutil/v4/net"
-	"github.com/spf13/cobra"
-
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-
-	//"github.com/ssgelm/cookiejarparser"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/objx"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/client-go/rest"
-
-	// kongv1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1"
-	// kongv1beta1 "github.com/kong/kubernetes-ingress-controller/v2/pkg/apis/configuration/v1beta1"
-
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
-
-	// netv1 "k8s.io/api/networking/v1"
-	"github.com/stretchr/objx"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -91,11 +78,6 @@ const (
 	vmNetworkLogFile = "vm-network-summary.json"
 	vmHostsFile      = "vm-hosts"
 	vmResolvFile     = "vm-resolv.conf"
-	k8ResolvFile     = "k8-resolv.conf"
-	k8HostsFile      = "k8-hosts"
-	k8sOSReleaseFile = "k8-os-release"
-	k8sCpuInfoFile   = "k8-cpu-info"
-	k8sMemInfoFile   = "k8-mem-info"
 )
 
 var (
@@ -351,7 +333,6 @@ func guessRuntime() (string, error) {
 		} else {
 			for _, p := range pl.Items {
 				for _, c := range p.Spec.Containers {
-					//for _, i := range append(kongImages, meshImages...) {
 					for _, i := range kongImages {
 						if strings.Contains(c.Image, i) {
 							kongK8sPods = append(kongK8sPods, p.Name)
@@ -759,7 +740,7 @@ func getObjx(req *http.Request, client *kong.Client) (objx.Map, error) {
 		return nil, err
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	strBody := string(body)
 
 	oReturn, err := objx.FromJSON(strBody)
@@ -813,7 +794,6 @@ func runKubernetes(filesToCopy []string, commandsToRun [][]string) ([]string, er
 				if strings.ToLower(podName) == strings.ToLower(p.Name) {
 					for _, c := range p.Spec.Containers {
 						for _, i := range kongImages {
-							//log.Info("Checking pod: ", p.Name, " for image:", i)
 							if strings.Contains(c.Image, i) {
 								if !foundPod[p.Name] {
 									log.Info("Appending: ", p.Name, " with container count: ", len(p.Spec.Containers))
@@ -828,7 +808,6 @@ func runKubernetes(filesToCopy []string, commandsToRun [][]string) ([]string, er
 		} else {
 			for _, c := range p.Spec.Containers {
 				for _, i := range kongImages {
-					//log.Info("Checking pod: ", p.Name, " for image:", i)
 					if strings.Contains(c.Image, i) {
 						if !foundPod[p.Name] {
 							log.Info("Appending: ", p.Name, " with container count: ", len(p.Spec.Containers))
@@ -1205,13 +1184,11 @@ func writePodDetails(ctx context.Context, clientSet kubernetes.Interface, podLis
 
 		log.Info("Working on Pod: ", p.Name, " in namespace: ", p.Namespace)
 
-		//for _, container := range append(p.Spec.InitContainers, p.Spec.Containers...) {
 		for _, container := range p.Spec.Containers {
 
 			relevantImage := false
 
 			for _, i := range kongImages {
-				//log.Info("Checking container: ", container.Name, " for image: ", i)
 				if strings.Contains(container.Image, i) {
 					relevantImage = true
 				}
@@ -1224,7 +1201,6 @@ func writePodDetails(ctx context.Context, clientSet kubernetes.Interface, podLis
 					logsSinceSeconds, err = strconv.ParseInt(os.Getenv("K8S_LOGS_SINCE_SECONDS"), 10, 64)
 				}
 
-				//options := types.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Since: logsSinceSeconds, Details: true}
 				podLogOpts := corev1.PodLogOptions{}
 
 				if logsSinceSeconds > 0 {
@@ -1232,8 +1208,6 @@ func writePodDetails(ctx context.Context, clientSet kubernetes.Interface, podLis
 				} else {
 					podLogOpts = corev1.PodLogOptions{Container: container.Name, TailLines: &lineLimit}
 				}
-
-				//podLogOpts.TailLines = &[]int64{int64(100)}[0]
 
 				podLogs, err := clientSet.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts).Stream(ctx)
 
@@ -1586,13 +1560,6 @@ func copyFiles(srcFile string, dstFile string) error {
 }
 
 func WriteOutputToFile(filename string, data []byte) error {
-	// err := os.Mkdir(directory, 0755)
-
-	// if err != nil && !os.IsExist(err) {
-	// 	log.Fatal(err)
-	// 	return err
-	// }
-
 	err := os.WriteFile(filename, data, 0644)
 
 	if err != nil {
@@ -1631,18 +1598,6 @@ func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID
 			log.Error("Error attaching to exec: ", err)
 			return nil, err
 		}
-
-		// _, err = io.Copy(os.Stdout, resp.Reader)
-		// if err != nil {
-		// 	log.Error("Error copying output: ", err)
-		// 	return nil, err
-		// }
-
-		// data, err := io.ReadAll(resp.Reader)
-		// if err != nil {
-		// 	log.Error("Error reading response: ", err)
-		// 	return nil, err
-		// }
 
 		output, err := decodeDockerMultiplexedStream(resp.Reader)
 		if err != nil {
