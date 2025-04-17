@@ -1772,7 +1772,8 @@ func RunCommandInPod(
 	}
 
 	// dstFile := container + "-" + strings.Replace(cmd[0]+cmd[1], "/", "-", -1)
-	dstFile := fmt.Sprintf("%s-%s.log", container, namedCmd.Name)
+	sanitizedName := strings.ReplaceAll(namedCmd.Name, "/", "-")
+	dstFile := fmt.Sprintf("%s-%s.log", container, sanitizedName)
 
 	// log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
 
