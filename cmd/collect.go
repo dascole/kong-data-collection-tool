@@ -161,6 +161,11 @@ type PortForwardAPodRequest struct {
 	ReadyCh chan struct{}
 }
 
+type NamedCommand struct {
+	Cmd  []string
+	Name string
+}
+
 var collectCmd = &cobra.Command{
 	Use:    "collect",
 	Short:  "Collect Kong and Environment information",
@@ -176,10 +181,19 @@ var collectCmd = &cobra.Command{
 			"/etc/os-release",
 		}
 
-		commandsToRun := [][]string{
-			{"top", "-b", "-n", "1"},
-			{"ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
-			{"sh", "-c", "ulimit", "-n"},
+		// commandsToRun := [][]string{
+		// 	{"top", "-b", "-n", "1"},
+		// 	{"ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
+		// 	{"sh", "-c", "ulimit", "-n"},
+		// }
+		commandsToRun := []NamedCommand{
+			{Cmd: []string{"top", "-b", "-n", "1"}, Name: "top"},
+			{Cmd: []string{"ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"}, Name: "templates"},
+			{Cmd: []string{"sh", "-c", "ulimit", "-n"}, Name: "ulimit"},
+			{Cmd: []string{"uname", "-a"}, Name: "uname"},
+			{Cmd: []string{"ps", "aux"}, Name: "ps"},
+			{Cmd: []string{"df", "-h"}, Name: "df"},
+			{Cmd: []string{"free", "-h"}, Name: "free"},
 		}
 
 		if rType == "" {
@@ -211,11 +225,12 @@ var collectCmd = &cobra.Command{
 				filesToZip = append(filesToZip, k8sFilesToZip...)
 			}
 		case "vm":
-			if vmFilesToZip, err := runVM(); err != nil {
-				log.Error("Error with VM runtime collection: ", err.Error())
-			} else {
-				filesToZip = append(filesToZip, vmFilesToZip...)
-			}
+			// if vmFilesToZip, err := runVM(); err != nil {
+			// 	log.Error("Error with VM runtime collection: ", err.Error())
+			// } else {
+			// 	filesToZip = append(filesToZip, vmFilesToZip...)
+			// }
+			fmt.Println("Running VM")
 		default:
 			log.Error("Runtime not found:", rType)
 		}
@@ -369,7 +384,7 @@ func guessRuntime() (string, error) {
 	return "", fmt.Errorf(strings.Join(errList, "\n"))
 }
 
-func runDocker(filesToCopy []string, commandsToRun [][]string) ([]string, error) {
+func runDocker(filesToCopy []string, commandsToRun []NamedCommand) ([]string, error) {
 	ctx := context.Background()
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -766,7 +781,7 @@ func getWorkspaces(client *kong.Client) (*Workspaces, error) {
 	return &w, nil
 }
 
-func runKubernetes(filesToCopy []string, commandsToRun [][]string) ([]string, error) {
+func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string, error) {
 	log.Info("Running Kubernetes")
 	ctx := context.Background()
 	var kongK8sPods []corev1.Pod
@@ -826,7 +841,12 @@ func runKubernetes(filesToCopy []string, commandsToRun [][]string) ([]string, er
 		for _, pod := range kongK8sPods {
 			for _, container := range pod.Spec.Containers {
 				for _, file := range filesToCopy {
-					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, []string{"cat", file})
+					namedCmd := NamedCommand{
+						Cmd:  []string{"cat", file},
+						Name: file,
+					}
+
+					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, namedCmd)
 
 					if err != nil {
 						log.Error("Error copying file: ", pod.Name, err.Error())
@@ -835,10 +855,11 @@ func runKubernetes(filesToCopy []string, commandsToRun [][]string) ([]string, er
 					if filename != "" {
 						filesToZip = append(filesToZip, filename)
 					}
+					fmt.Printf("Copying %s from %s\n", file, pod.Name)
 				}
 
-				for _, cmd := range commandsToRun {
-					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, cmd)
+				for _, namedCmd := range commandsToRun {
+					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, namedCmd)
 
 					if err != nil {
 						log.Error("Error copying file: ", pod.Name, err.Error())
@@ -1571,11 +1592,12 @@ func WriteOutputToFile(filename string, data []byte) error {
 
 }
 
-func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID string, cmd [][]string) (filesToWrite []string, err error) {
-	for _, c := range cmd {
-		log.Info("Running command: ", c)
+func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID string, commands []NamedCommand) (filesToWrite []string, err error) {
+	for _, nc := range commands {
+		log.Info("Running command: %s", strings.Join(nc.Cmd, " "))
+
 		config := container.ExecOptions{
-			Cmd:          c,
+			Cmd:          nc.Cmd,
 			Tty:          false,
 			AttachStderr: false,
 			AttachStdout: true,
@@ -1605,13 +1627,13 @@ func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID
 			return nil, err
 		}
 
-		err = WriteOutputToFile(c[0]+c[1], output)
+		err = WriteOutputToFile(nc.Name, output)
 		if err != nil {
 			log.Error("Error writing output to file: ", err)
 			return nil, err
 		}
 
-		filesToWrite = append(filesToWrite, c[0]+c[1])
+		filesToWrite = append(filesToWrite, nc.Name)
 	}
 
 	return filesToWrite, nil
@@ -1704,7 +1726,7 @@ func RunCommandInPod(
 	namespace string,
 	pod string,
 	container string,
-	cmd []string) (string, error) {
+	namedCmd NamedCommand) (string, error) {
 	exe, err := os.Executable()
 
 	if err != nil {
@@ -1724,7 +1746,8 @@ func RunCommandInPod(
 		Param("stdin", "false").
 		Param("stdout", "true").
 		Param("stderr", "true")
-	for _, c := range cmd {
+
+	for _, c := range namedCmd.Cmd {
 		log.Info("Adding command: ", c)
 		req.Param("command", c)
 	}
@@ -1748,8 +1771,10 @@ func RunCommandInPod(
 		return "", err
 	}
 
-	dstFile := container + "-" + strings.Replace(cmd[0]+cmd[1], "/", "-", -1)
-	log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
+	// dstFile := container + "-" + strings.Replace(cmd[0]+cmd[1], "/", "-", -1)
+	dstFile := fmt.Sprintf("%s-%s.log", container, namedCmd.Name)
+
+	// log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
 
 	err = WriteOutputToFile(dstFile, stdout.Bytes())
 	if err != nil {
