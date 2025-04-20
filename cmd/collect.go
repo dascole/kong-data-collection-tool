@@ -82,6 +82,7 @@ const (
 
 var (
 	rType                      string
+	konnectMode                bool
 	kongImages                 []string
 	deckHeaders                []string
 	targetPods                 []string
@@ -273,6 +274,7 @@ var (
 func init() {
 	rootCmd.AddCommand(collectCmd)
 	collectCmd.PersistentFlags().StringVarP(&rType, "runtime", "r", "", "Runtime to extract logs from (kubernetes or docker). Runtime is auto detected if omitted.")
+	collectCmd.PersistentFlags().BoolVarP(&konnectMode, "konnect-mode", "x", false, "Enables Konnect mode. This will use the Konnect API to collect data.")
 	collectCmd.PersistentFlags().StringSliceVarP(&kongImages, "target-images", "i", defaultKongImageList, `Override default gateway images to scrape logs from. Default: "kong-gateway","kubernetes-ingress-controller"`)
 	collectCmd.PersistentFlags().StringSliceVarP(&deckHeaders, "rbac-header", "H", nil, "RBAC header required to contact the admin-api.")
 	collectCmd.PersistentFlags().StringVarP(&kongAddr, "kong-addr", "a", "http://localhost:8001", "The address to reach the admin-api of the Kong instance in question.")
@@ -586,6 +588,12 @@ func getKDD() ([]string, error) {
 	var finalResponse = make(map[string]interface{})
 	var filesToZip []string
 
+	if os.Getenv("KONG_KONNECT_MODE") != "" {
+		// avoid reusing native Kong variable names, i.e. KONG_KONNECT_MODE
+		// https://docs.konghq.com/gateway/latest/reference/configuration/#konnect_mode
+		konnectMode, _ = strconv.ParseBool(os.Getenv("KONG_KDD_KONNECT"))
+	}
+
 	if os.Getenv("KONG_ADDR") != "" {
 		kongAddr = os.Getenv("KONG_ADDR")
 	}
@@ -594,143 +602,177 @@ func getKDD() ([]string, error) {
 		deckHeaders = strings.Split(os.Getenv("RBAC_HEADER"), ",")
 	}
 
-	client, err := utils.GetKongClient(utils.KongClientConfig{
-		Address: kongAddr,
-		TLSConfig: utils.TLSConfig{
-			SkipVerify: true,
-		},
-		Debug:   false,
-		Headers: deckHeaders,
-	})
+	// if konnectMode {
+	// 	fmt.Printf("#### KONNECT.\n")
+	// 	return nil, nil
+	// } else {
+	// 	fmt.Printf("### ON PREM.\n")
+	// 	return nil, nil
+	// }
 
-	if err != nil {
-		return nil, err
-	}
-
-	root, err := client.RootJSON(context.Background())
-
-	if err != nil {
-		return nil, err
-	}
-
-	rootConfig, err = objx.FromJSON(string(root))
-
-	if err != nil {
-		return nil, err
-	}
-
-	status, _ := getEndpoint(client, "/status")
-
-	workspaces, err := getWorkspaces(client)
-
-	if err != nil {
-		return nil, err
-	}
-
-	licenseReport, err := getEndpoint(client, "/license/report")
-
-	if err != nil {
-		return nil, err
-	}
-
-	summaryInfo.TotalWorkspaceCount = len(workspaces.Data)
-	summaryInfo.DeploymentTopology = rootConfig.Get("configuration.role").Str()
-	summaryInfo.DatabaseType = rootConfig.Get("configuration.database").Str()
-	summaryInfo.KongVersion = rootConfig.Get("version").Str()
-
-	switch summaryInfo.DeploymentTopology {
-	case "control_plane":
-		summaryInfo.DeploymentTopology = "hybrid"
-	case "traditional":
-		if summaryInfo.DatabaseType == "off" {
-			summaryInfo.DeploymentTopology = "DB-Less"
-		}
-	}
-
-	finalResponse["root_config"] = rootConfig
-	finalResponse["status"] = status
-	finalResponse["license_report"] = licenseReport
-
-	//Incomplete data as yet, but saving what we've collected so far incase of error during workspace iteration
-	finalResponse["summary_info"] = summaryInfo
-
-	if os.Getenv("DUMP_WORKSPACE_CONFIGS") != "" {
-		log.Info("Var:", os.Getenv("DUMP_WORKSPACE_CONFIGS"))
-		createWorkspaceConfigDumps = (os.Getenv("DUMP_WORKSPACE_CONFIGS") == "true")
-	}
-
-	for _, ws := range workspaces.Data {
-
-		client.SetWorkspace(ws.Name)
-
-		d, err := dump.Get(context.Background(), client, dump.Config{
-			RBACResourcesOnly: false,
-			SkipConsumers:     false,
+	if !konnectMode {
+		// Get the Kong client
+		client, err := utils.GetKongClient(utils.KongClientConfig{
+			Address: kongAddr,
+			TLSConfig: utils.TLSConfig{
+				SkipVerify: true,
+			},
+			Debug:   false,
+			Headers: deckHeaders,
 		})
 
 		if err != nil {
-			log.Error("Error getting workspace data for: ", ws.Name)
-			log.Error(err.Error(), " continuing to next workspace")
-		} else {
-			summaryInfo.TotalConsumerCount += len(d.Consumers)
-			summaryInfo.TotalServiceCount += len(d.Services)
-			summaryInfo.TotalRouteCount += len(d.Routes)
-			summaryInfo.TotalPluginCount += len(d.Plugins)
-			summaryInfo.TotalTargetCount += len(d.Targets)
-			summaryInfo.TotalUpstreamCount += len(d.Upstreams)
+			return nil, err
+		}
 
-			for _, v := range d.Routes {
-				for _, route := range v.Paths {
-					if strings.HasPrefix(*route, "~") {
-						summaryInfo.TotalRegExRoutes += 1
+		// response of GET request on the root of the Admin
+		root, err := client.RootJSON(context.Background())
+
+		if err != nil {
+			return nil, err
+		}
+
+		// create a map from the JSON response
+		rootConfig, err = objx.FromJSON(string(root))
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Get the status and list of workspaces
+		status, _ := getEndpoint(client, "/status")
+		workspaces, err := getWorkspaces(client)
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Get the license report
+		licenseReport, err := getEndpoint(client, "/license/report")
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Update the summaryInfo struct
+		summaryInfo.TotalWorkspaceCount = len(workspaces.Data)
+		summaryInfo.DeploymentTopology = rootConfig.Get("configuration.role").Str()
+		summaryInfo.DatabaseType = rootConfig.Get("configuration.database").Str()
+		summaryInfo.KongVersion = rootConfig.Get("version").Str()
+
+		switch summaryInfo.DeploymentTopology {
+		case "control_plane":
+			summaryInfo.DeploymentTopology = "hybrid"
+		case "traditional":
+			if summaryInfo.DatabaseType == "off" {
+				summaryInfo.DeploymentTopology = "DB-Less"
+			}
+		}
+
+		// Add the root config, status, and license report to the final response map
+		finalResponse["root_config"] = rootConfig
+		finalResponse["status"] = status
+		finalResponse["license_report"] = licenseReport
+
+		//Incomplete data as yet, but saving what we've collected so far incase of error during workspace iteration
+		finalResponse["summary_info"] = summaryInfo
+
+		if os.Getenv("DUMP_WORKSPACE_CONFIGS") != "" {
+			log.Info("Var:", os.Getenv("DUMP_WORKSPACE_CONFIGS"))
+			createWorkspaceConfigDumps = (os.Getenv("DUMP_WORKSPACE_CONFIGS") == "true")
+		}
+
+		for _, ws := range workspaces.Data {
+
+			client.SetWorkspace(ws.Name)
+
+			// Queries all the entities using client and returns all the entities in KongRawState.
+			d, err := dump.Get(context.Background(), client, dump.Config{
+				RBACResourcesOnly: false,
+				SkipConsumers:     false,
+			})
+
+			if err != nil {
+				log.Error("Error getting workspace data for: ", ws.Name)
+				log.Error(err.Error(), " continuing to next workspace")
+			} else {
+				// tally up the entity counts
+				summaryInfo.TotalConsumerCount += len(d.Consumers)
+				summaryInfo.TotalServiceCount += len(d.Services)
+				summaryInfo.TotalRouteCount += len(d.Routes)
+				summaryInfo.TotalPluginCount += len(d.Plugins)
+				summaryInfo.TotalTargetCount += len(d.Targets)
+				summaryInfo.TotalUpstreamCount += len(d.Upstreams)
+
+				// iterate through the routes and count regex routes
+				for _, v := range d.Routes {
+					for _, route := range v.Paths {
+						if strings.HasPrefix(*route, "~") {
+							summaryInfo.TotalRegExRoutes += 1
+						}
+					}
+				}
+
+				// Check if portal is enabled
+				if ws.Config.Portal {
+					summaryInfo.TotalEnabledDevPortalCount += 1
+				}
+
+				if createWorkspaceConfigDumps {
+					ks, err := state.Get(d)
+					if err != nil {
+						log.Errorf("building Kong dump state: %w", err)
+					}
+					err = file.KongStateToFile(ks, file.WriteConfig{
+						KongVersion: summaryInfo.KongVersion,
+						Filename:    ws.Name + "-kong-dump.yaml",
+						FileFormat:  file.YAML,
+					})
+					if err != nil {
+						log.Errorf("building Kong dump file: %w", err)
+					} else {
+						log.Info("Successfully dumped workspace: ", ws.Name)
+						filesToZip = append(filesToZip, ws.Name+"-kong-dump.yaml")
 					}
 				}
 			}
-
-			if ws.Config.Portal {
-				summaryInfo.TotalEnabledDevPortalCount += 1
-			}
-
-			if createWorkspaceConfigDumps {
-				ks, err := state.Get(d)
-				if err != nil {
-					log.Errorf("building Kong dump state: %w", err)
-				}
-				err = file.KongStateToFile(ks, file.WriteConfig{
-					KongVersion: summaryInfo.KongVersion,
-					Filename:    ws.Name + "-kong-dump.yaml",
-					FileFormat:  file.YAML,
-				})
-				if err != nil {
-					log.Errorf("building Kong dump file: %w", err)
-				} else {
-					log.Info("Successfully dumped workspace: ", ws.Name)
-					filesToZip = append(filesToZip, ws.Name+"-kong-dump.yaml")
-				}
-			}
 		}
+
+		//Add the full info now we know we have it all
+		finalResponse["summary_info"] = summaryInfo
+
+		jsonBytes, err := json.Marshal(finalResponse)
+
+		if err != nil {
+			log.Error("Error marshalling json:", err)
+		}
+
+		err = os.WriteFile("KDD.json", jsonBytes, 0644)
+		if err != nil {
+			log.Fatal("Error writing KDD.json")
+			return filesToZip, err
+		} else {
+			filesToZip = append(filesToZip, "KDD.json")
+		}
+
+		//Clear workspace slice at this point if not writing dump files, otherwise app will try and add files to zip
+
+		return filesToZip, nil
 	}
 
-	//Add the full info now we know we have it all
-	finalResponse["summary_info"] = summaryInfo
+	fmt.Printf("Konnect mode enabled. Using token: %s\n", deckHeaders)
+	// Handle Konnect mode
+	// config := utils.KonnectConfig{
+	// 	ControlPlaneName: "default",
+	// 	// Token: "kpat_0VmzJakBVl013FQckERgQq9a50XvqedfiYMC3SByenffZercC",
+	// 	Token:    deckHeaders[0],
+	// 	Email:    "",
+	// 	Password: "",
+	// 	Address:  kongAddr,
+	// }
 
-	jsonBytes, err := json.Marshal(finalResponse)
-
-	if err != nil {
-		log.Error("Error marshalling json:", err)
-	}
-
-	err = os.WriteFile("KDD.json", jsonBytes, 0644)
-	if err != nil {
-		log.Fatal("Error writing KDD.json")
-		return filesToZip, err
-	} else {
-		filesToZip = append(filesToZip, "KDD.json")
-	}
-
-	//Clear workspace slice at this point if not writing dump files, otherwise app will try and add files to zip
-
-	return filesToZip, nil
+	// fmt.Printf("Konnect mode enabled. Using token: %s\n", config.Token)
+	return nil, nil
 }
 
 func getEndpoint(client *kong.Client, endpoint string) (objx.Map, error) {
@@ -1954,6 +1996,8 @@ type Workspaces struct {
 	} `json:"data"`
 	Next interface{} `json:"next"`
 }
+
+// TODO: add KonnectSummaryInfo struct
 
 type SummaryInfo struct {
 	DatabaseType               string `json:"database_type"`
