@@ -32,7 +32,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +101,19 @@ var (
 	disableKDDCollection       bool
 	strToRedact                []string
 )
+
+// initLogging sets up logrus with standard configuration
+func initLogging() {
+	// Configure logrus with timestamp, level, and caller information
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: "2006-01-02 15:04:05",
+	})
+	// Set output to stdout
+	log.SetOutput(os.Stdout)
+	// Set default log level
+	log.SetLevel(log.InfoLevel)
+}
 
 type Summary struct {
 	Version  string
@@ -177,6 +189,8 @@ var collectCmd = &cobra.Command{
 	Long:   `Collect Kong and Environment information.`,
 	PreRun: toggleDebug,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Initialize logging at the start
+		initLogging()
 
 		var filesToZip []string
 
@@ -186,11 +200,6 @@ var collectCmd = &cobra.Command{
 			"/etc/os-release",
 		}
 
-		// commandsToRun := [][]string{
-		// 	{"top", "-b", "-n", "1"},
-		// 	{"ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"},
-		// 	{"sh", "-c", "ulimit", "-n"},
-		// }
 		commandsToRun := []NamedCommand{
 			{Cmd: []string{"top", "-b", "-n", "1"}, Name: "top"},
 			{Cmd: []string{"ls", "-lart", "/usr/local/share/lua/5.1/kong/templates"}, Name: "templates"},
@@ -209,6 +218,7 @@ var collectCmd = &cobra.Command{
 			log.Info("No runtime detected, attempting to guess runtime...")
 			runtime, err := guessRuntime()
 			if err != nil {
+				log.WithError(err).Error("Failed to guess runtime")
 				return err
 			}
 			rType = runtime
@@ -216,28 +226,33 @@ var collectCmd = &cobra.Command{
 
 		switch rType {
 		case "docker":
-
-			if dockerFilesToZip, err := runDocker(filesToCopy, commandsToRun); err != nil {
-				log.Error("Error with docker runtime collection: ", err.Error())
+			log.Info("Using Docker runtime")
+			dockerFilesToZip, err := runDocker(filesToCopy, commandsToRun)
+			if err != nil {
+				log.WithError(err).Error("Error with docker runtime collection")
 			} else {
 				filesToZip = append(filesToZip, dockerFilesToZip...)
 			}
 
 		case "kubernetes":
-			if k8sFilesToZip, err := runKubernetes(filesToCopy, commandsToRun); err != nil {
-				log.Error("Error with VM runtime collection: ", err.Error())
+			log.Info("Using Kubernetes runtime")
+			k8sFilesToZip, err := runKubernetes(filesToCopy, commandsToRun)
+			if err != nil {
+				log.WithError(err).Error("Error with Kubernetes runtime collection")
 			} else {
 				filesToZip = append(filesToZip, k8sFilesToZip...)
 			}
+
 		case "vm":
-			// if vmFilesToZip, err := runVM(); err != nil {
-			// 	log.Error("Error with VM runtime collection: ", err.Error())
+			log.Info("Using VM runtime")
+			// vmFilesToZip, err := runVM()
+			// if err != nil {
+			//     log.WithError(err).Error("Error with VM runtime collection")
 			// } else {
-			// 	filesToZip = append(filesToZip, vmFilesToZip...)
+			//     filesToZip = append(filesToZip, vmFilesToZip...)
 			// }
-			fmt.Println("Running VM")
 		default:
-			log.Error("Runtime not found:", rType)
+			log.WithField("runtime", rType).Error("Runtime not supported")
 		}
 
 		if os.Getenv("DISABLE_KDD") != "" {
@@ -245,15 +260,15 @@ var collectCmd = &cobra.Command{
 		}
 
 		if disableKDDCollection && createWorkspaceConfigDumps {
-			log.Info("Cannot create workspaces dumps when KDD collection is disabled")
+			log.Warn("Cannot create workspaces dumps when KDD collection is disabled")
 		}
 
 		if !disableKDDCollection {
 			log.Info("KDD collection is enabled")
 
-			if kddFilesToZip, err := getKDD(); err != nil {
-				log.Error("Error with KDD collection: ", err.Error())
-				//return err
+			kddFilesToZip, err := getKDD()
+			if err != nil {
+				log.WithError(err).Error("Error with KDD collection")
 			} else {
 				filesToZip = append(filesToZip, kddFilesToZip...)
 			}
@@ -262,9 +277,8 @@ var collectCmd = &cobra.Command{
 		log.Info("Writing tar.gz output")
 
 		err := writeFiles(filesToZip)
-
 		if err != nil {
-			log.Error("Error writing tar.gz file: ", err.Error())
+			log.WithError(err).Error("Error writing tar.gz file")
 		}
 
 		return nil
@@ -312,15 +326,11 @@ func guessRuntime() (string, error) {
 	}
 
 	_, err = cli.ServerVersion(ctx)
-
-	//log.Info("Docker Version:", version.Arch)
-
 	if err != nil {
 		errList = append(errList, err.Error())
 	}
 
 	containers, err := cli.ContainerList(ctx, container.ListOptions{})
-
 	if err != nil {
 		errList = append(errList, err.Error())
 	}
@@ -336,7 +346,7 @@ func guessRuntime() (string, error) {
 	}
 
 	if len(kongContainers) > 0 {
-		log.Info("Docker found")
+		log.Info("Docker runtime detected")
 		return Docker, nil
 	}
 
@@ -346,7 +356,6 @@ func guessRuntime() (string, error) {
 
 	if err != nil {
 		errList = append(errList, err.Error())
-
 	} else {
 		pl, err := kubeClient.CoreV1().Pods("").List(context.Background(), v1.ListOptions{})
 
@@ -364,7 +373,7 @@ func guessRuntime() (string, error) {
 			}
 
 			if len(kongK8sPods) > 0 {
-				log.Info("Kubernetes found")
+				log.Info("Kubernetes runtime detected")
 				return Kubernetes, nil
 			}
 		}
@@ -373,7 +382,7 @@ func guessRuntime() (string, error) {
 	//If environment files exist, then VM install
 	if _, err := os.Stat("/usr/local/kong/.kong_env"); err == nil {
 		prefixDir = "/usr/local/kong"
-		log.Info("VM found")
+		log.Info("VM runtime detected")
 		return VM, nil
 	} else {
 		errList = append(errList, err.Error())
@@ -381,7 +390,7 @@ func guessRuntime() (string, error) {
 		//try /KONG_PREFIX
 		if _, err := os.Stat("/KONG_PREFIX/.kong_env"); err == nil {
 			prefixDir = "/KONG_PREFIX"
-			log.Info("VM found")
+			log.Info("VM runtime detected with alternate prefix directory")
 			return VM, nil
 		} else {
 			errList = append(errList, err.Error())
@@ -395,17 +404,17 @@ func runDocker(filesToCopy []string, commandsToRun []NamedCommand) ([]string, er
 	ctx := context.Background()
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
-		log.Error("Unable to create docker api client")
+		log.WithError(err).Error("Unable to create docker api client")
 		return nil, err
 	}
 
 	containers, err := cli.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
-		log.Error("Unable to get container list from docker api", err.Error())
+		log.WithError(err).Error("Unable to get container list from docker api")
 		return nil, err
 	}
 
-	log.Info("Found: ", len(containers), " containers running")
+	log.WithField("count", len(containers)).Info("Found containers running")
 
 	var kongContainers []types.Container
 
@@ -417,153 +426,167 @@ func runDocker(filesToCopy []string, commandsToRun []NamedCommand) ([]string, er
 		}
 	}
 
+	log.WithField("count", len(kongContainers)).Info("Found Kong containers")
+
 	var filesToZip []string
 
 	for _, c := range kongContainers {
-		log.Info("Inspecting container: ", c.ID)
+		log.WithField("containerID", c.ID).Info("Inspecting container")
 
 		copiedFiles, err := CopyFilesFromContainers(ctx, cli, c.ID, filesToCopy)
-
 		if err != nil {
-			log.Error("Error copying files from container: ", err.Error())
+			log.WithFields(log.Fields{
+				"containerID": c.ID,
+				"error":       err,
+			}).Error("Error copying files from container")
 		}
 
 		executedFiles, err := RunCommandsInContainer(ctx, cli, c.ID, commandsToRun)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"containerID": c.ID,
+				"error":       err,
+			}).Error("Error running commands in container")
+		}
 
-		log.Error("Files copied: ", copiedFiles)
+		log.WithField("count", len(copiedFiles)).Debug("Files copied from container")
 		filesToZip = append(filesToZip, copiedFiles...)
 		filesToZip = append(filesToZip, executedFiles...)
 
 		_, b, err := cli.ContainerInspectWithRaw(ctx, c.ID, false)
 		if err != nil {
-			log.Error("Unable to inspect container:", err.Error())
+			log.WithFields(log.Fields{
+				"containerID": c.ID,
+				"error":       err,
+			}).Error("Unable to inspect container")
 			continue
-			//return err
 		}
 
 		prettyJSON, err := formatJSON(b)
 		if err != nil {
-			log.Error("Unable to format JSON:", err)
+			log.WithError(err).Error("Unable to format JSON")
 			continue
-			//return err
 		}
 
 		sanitizedImageName := strings.ReplaceAll(strings.ReplaceAll(c.Image, ":", "/"), "/", "-")
 		sanitizedContainerName := strings.ReplaceAll(c.Names[0], "/", "")
 		inspectFilename := fmt.Sprintf("%s-%s.json", sanitizedContainerName, sanitizedImageName)
 		inspectFile, err := os.Create(inspectFilename)
-		defer inspectFile.Close()
-
 		if err != nil {
-			log.Error("Unable to create inspection file:", err)
+			log.WithFields(log.Fields{
+				"filename": inspectFilename,
+				"error":    err,
+			}).Error("Unable to create inspection file")
 			continue
-			//return err
-		} else {
-			log.Infof("writing docker inspect data for %s", sanitizedContainerName)
-			_, err = io.Copy(inspectFile, bytes.NewReader(prettyJSON))
-			if err != nil {
-				log.Error("Unable to write inspect file:", err.Error())
-				continue
-				//return err
-			} else {
-				err = inspectFile.Close()
-				if err != nil {
-					log.Error("Unable to close inspect file:", err.Error())
-					continue
-					//return err
-				} else {
-					filesToZip = append(filesToZip, inspectFilename)
-				}
-			}
 		}
+
+		log.WithFields(log.Fields{
+			"container": sanitizedContainerName,
+			"filename":  inspectFilename,
+		}).Info("Writing docker inspect data")
+
+		_, err = io.Copy(inspectFile, bytes.NewReader(prettyJSON))
+		if err != nil {
+			log.WithError(err).Error("Unable to write inspect file")
+			inspectFile.Close()
+			continue
+		}
+
+		err = inspectFile.Close()
+		if err != nil {
+			log.WithError(err).Error("Unable to close inspect file")
+			continue
+		}
+
+		filesToZip = append(filesToZip, inspectFilename)
 
 		logsFilename := fmt.Sprintf("%s-%s.log", sanitizedContainerName, sanitizedImageName)
 		logFile, err := os.Create(logsFilename)
-		defer logFile.Close()
-
 		if err != nil {
-			log.Error("Unable to create container log file:", err.Error())
+			log.WithFields(log.Fields{
+				"filename": logsFilename,
+				"error":    err,
+			}).Error("Unable to create container log file")
 			continue
-			//return err
+		}
+
+		if os.Getenv("DOCKER_LOGS_SINCE") != "" {
+			logsSinceDocker = os.Getenv("DOCKER_LOGS_SINCE")
+		}
+
+		options := container.LogsOptions{}
+
+		if logsSinceDocker != "" {
+			options = container.LogsOptions{ShowStdout: true, ShowStderr: true, Since: logsSinceDocker, Details: true}
+			log.WithField("since", logsSinceDocker).Debug("Using time-based log retrieval")
 		} else {
+			strLineLimit := strconv.Itoa(int(lineLimit))
+			options = container.LogsOptions{ShowStdout: true, ShowStderr: true, Tail: strLineLimit, Details: true}
+			log.WithField("lineLimit", lineLimit).Debug("Using line-based log retrieval")
+		}
 
-			if os.Getenv("DOCKER_LOGS_SINCE") != "" {
-				logsSinceDocker = os.Getenv("DOCKER_LOGS_SINCE")
-			}
+		logs, err := cli.ContainerLogs(ctx, c.ID, options)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"containerID": c.ID,
+				"error":       err,
+			}).Error("Unable to retrieve container logs")
+			logFile.Close()
+			continue
+		}
 
-			options := container.LogsOptions{}
+		log.WithFields(log.Fields{
+			"container": sanitizedContainerName,
+			"filename":  logsFilename,
+		}).Info("Writing docker logs data")
 
-			if logsSinceDocker != "" {
-				options = container.LogsOptions{ShowStdout: true, ShowStderr: true, Since: logsSinceDocker, Details: true}
-			} else {
-				strLineLimit := strconv.Itoa(int(lineLimit))
-				options = container.LogsOptions{ShowStdout: true, ShowStderr: true, Tail: strLineLimit, Details: true}
-			}
+		buf := bufio.NewScanner(logs)
+		for buf.Scan() {
+			bytes := buf.Bytes()
+			var sanitizedBytes []byte
 
-			logs, err := cli.ContainerLogs(ctx, c.ID, options)
+			if len(bytes) > 7 {
+				B1 := bytes[0]
+				B2 := bytes[1]
+				B3 := bytes[2]
+				B4 := bytes[3]
+				B5 := bytes[4]
+				B6 := bytes[5]
+				B7 := bytes[6]
 
-			defer logs.Close()
-			if err != nil {
-				log.Error("Unable to retrieve container logs:", err)
-				continue
-				//return err
-			} else {
-				log.Infof("writing docker logs data for %s", sanitizedContainerName)
+				zeroByte := byte(0)
 
-				buf := bufio.NewScanner(logs)
-
-				for buf.Scan() {
-
-					bytes := buf.Bytes()
-					var sanitizedBytes []byte
-
-					if len(bytes) > 7 {
-
-						B1 := bytes[0]
-						B2 := bytes[1]
-						B3 := bytes[2]
-						B4 := bytes[3]
-						B5 := bytes[4]
-						B6 := bytes[5]
-						B7 := bytes[6]
-
-						zeroByte := byte(0)
-
-						//Remove header bytes from the docker cli log scans if they match specific patterns.
-						if B1 == byte(50) && B2 == byte(48) && B3 == byte(50) && B4 == byte(50) && B5 == byte(47) && B6 == byte(48) && B7 == byte(54) {
-							sanitizedBytes = bytes[8:]
-						} else if (B1 == byte(2) || B1 == byte(1)) && B2 == zeroByte && B3 == zeroByte && B4 == zeroByte && B5 == zeroByte && B6 == zeroByte && (B7 == zeroByte || B7 == byte(1)) {
-							sanitizedBytes = bytes[8:]
-						} else {
-							sanitizedBytes = bytes
-						}
-					}
-					sanitizedLogLine := string(sanitizedBytes) + "\n"
-
-					if len(strToRedact) > 0 {
-						sanitizedLogLine = analyseLogLineForRedaction(sanitizedLogLine + "\n")
-					}
-
-					_, err = io.Copy(logFile, strings.NewReader(sanitizedLogLine))
-					if err != nil {
-						log.Error("Unable to write container logs: ", err)
-						continue
-						//return err
-					}
-				}
-
-				err = logFile.Close()
-				if err != nil {
-					log.Error("Unable to close container logs: ", err)
-					continue
-					//return err
+				//Remove header bytes from the docker cli log scans if they match specific patterns.
+				if B1 == byte(50) && B2 == byte(48) && B3 == byte(50) && B4 == byte(50) && B5 == byte(47) && B6 == byte(48) && B7 == byte(54) {
+					sanitizedBytes = bytes[8:]
+				} else if (B1 == byte(2) || B1 == byte(1)) && B2 == zeroByte && B3 == zeroByte && B4 == zeroByte && B5 == zeroByte && B6 == zeroByte && (B7 == zeroByte || B7 == byte(1)) {
+					sanitizedBytes = bytes[8:]
 				} else {
-					filesToZip = append(filesToZip, logsFilename)
+					sanitizedBytes = bytes
 				}
+			}
 
+			sanitizedLogLine := string(sanitizedBytes) + "\n"
+
+			if len(strToRedact) > 0 {
+				sanitizedLogLine = analyseLogLineForRedaction(sanitizedLogLine)
+			}
+
+			_, err = io.Copy(logFile, strings.NewReader(sanitizedLogLine))
+			if err != nil {
+				log.WithError(err).Error("Unable to write container logs")
+				break
 			}
 		}
 
+		logs.Close()
+
+		if err := logFile.Close(); err != nil {
+			log.WithError(err).Error("Unable to close container logs file")
+			continue
+		}
+
+		filesToZip = append(filesToZip, logsFilename)
 	}
 
 	return filesToZip, nil
@@ -582,13 +605,6 @@ func analyseLogLineForRedaction(line string) string {
 }
 
 func getKDD() ([]string, error) {
-
-	//Responsible for creating the KDD.json object
-
-	//Generate KDD file
-
-	//Generate Workspace Dumps
-
 	ctx := context.Background()
 	var summaryInfo SummaryInfo
 	var finalResponse = make(map[string]interface{})
@@ -620,36 +636,40 @@ func getKDD() ([]string, error) {
 		})
 
 		if err != nil {
+			log.WithError(err).Error("Failed to get Kong client")
 			return nil, err
 		}
 
 		// response of GET request on the root of the Admin
 		root, err := client.RootJSON(context.Background())
-
 		if err != nil {
+			log.WithError(err).Error("Failed to get root JSON from Kong")
 			return nil, err
 		}
 
 		// create a map from the JSON response
 		rootConfig, err = objx.FromJSON(string(root))
-
 		if err != nil {
+			log.WithError(err).Error("Failed to parse root JSON")
 			return nil, err
 		}
 
 		// Get the status and list of workspaces
-		status, _ := getEndpoint(client, "/status")
-		workspaces, err := getWorkspaces(client)
-
+		status, err := getEndpoint(client, "/status")
 		if err != nil {
+			log.WithError(err).Warn("Failed to get status endpoint")
+		}
+
+		workspaces, err := getWorkspaces(client)
+		if err != nil {
+			log.WithError(err).Error("Failed to get workspaces")
 			return nil, err
 		}
 
 		// Get the license report
 		licenseReport, err := getEndpoint(client, "/license/report")
-
 		if err != nil {
-			return nil, err
+			log.WithError(err).Warn("Failed to get license report")
 		}
 
 		// Update the summaryInfo struct
@@ -676,12 +696,12 @@ func getKDD() ([]string, error) {
 		finalResponse["summary_info"] = summaryInfo
 
 		if os.Getenv("DUMP_WORKSPACE_CONFIGS") != "" {
-			log.Info("Var:", os.Getenv("DUMP_WORKSPACE_CONFIGS"))
+			log.WithField("env_var", os.Getenv("DUMP_WORKSPACE_CONFIGS")).Debug("Dump workspace configs environment variable found")
 			createWorkspaceConfigDumps = (os.Getenv("DUMP_WORKSPACE_CONFIGS") == "true")
 		}
 
 		for _, ws := range workspaces.Data {
-
+			log.WithField("workspace", ws.Name).Info("Processing workspace")
 			client.SetWorkspace(ws.Name)
 
 			// Queries all the entities using client and returns all the entities in KongRawState.
@@ -691,86 +711,91 @@ func getKDD() ([]string, error) {
 			})
 
 			if err != nil {
-				log.Error("Error getting workspace data for: ", ws.Name)
-				log.Error(err.Error(), " continuing to next workspace")
-			} else {
-				// tally up the entity counts
-				summaryInfo.TotalConsumerCount += len(d.Consumers)
-				summaryInfo.TotalServiceCount += len(d.Services)
-				summaryInfo.TotalRouteCount += len(d.Routes)
-				summaryInfo.TotalPluginCount += len(d.Plugins)
-				summaryInfo.TotalTargetCount += len(d.Targets)
-				summaryInfo.TotalUpstreamCount += len(d.Upstreams)
+				log.WithFields(log.Fields{
+					"workspace": ws.Name,
+					"error":     err,
+				}).Error("Error getting workspace data, continuing to next workspace")
+				continue
+			}
 
-				// iterate through the routes and count regex routes
-				for _, v := range d.Routes {
-					for _, route := range v.Paths {
-						if strings.HasPrefix(*route, "~") {
-							summaryInfo.TotalRegExRoutes += 1
-						}
+			// tally up the entity counts
+			summaryInfo.TotalConsumerCount += len(d.Consumers)
+			summaryInfo.TotalServiceCount += len(d.Services)
+			summaryInfo.TotalRouteCount += len(d.Routes)
+			summaryInfo.TotalPluginCount += len(d.Plugins)
+			summaryInfo.TotalTargetCount += len(d.Targets)
+			summaryInfo.TotalUpstreamCount += len(d.Upstreams)
+
+			// iterate through the routes and count regex routes
+			for _, v := range d.Routes {
+				for _, route := range v.Paths {
+					if strings.HasPrefix(*route, "~") {
+						summaryInfo.TotalRegExRoutes += 1
 					}
 				}
+			}
 
-				// Check if portal is enabled
-				if ws.Config.Portal {
-					summaryInfo.TotalEnabledDevPortalCount += 1
+			// Check if portal is enabled
+			if ws.Config.Portal {
+				summaryInfo.TotalEnabledDevPortalCount += 1
+			}
+
+			if createWorkspaceConfigDumps {
+				ks, err := state.Get(d)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"workspace": ws.Name,
+						"error":     err,
+					}).Error("Error building Kong dump state")
+					continue
 				}
 
-				if createWorkspaceConfigDumps {
-					ks, err := state.Get(d)
-					if err != nil {
-						log.Errorf("building Kong dump state: %w", err)
-					}
-					err = file.KongStateToFile(ks, file.WriteConfig{
-						KongVersion: summaryInfo.KongVersion,
-						Filename:    ws.Name + "-kong-dump.yaml",
-						FileFormat:  file.YAML,
-					})
-					if err != nil {
-						log.Errorf("building Kong dump file: %w", err)
-					} else {
-						log.Info("Successfully dumped workspace: ", ws.Name)
-						filesToZip = append(filesToZip, ws.Name+"-kong-dump.yaml")
-					}
+				err = file.KongStateToFile(ks, file.WriteConfig{
+					KongVersion: summaryInfo.KongVersion,
+					Filename:    ws.Name + "-kong-dump.yaml",
+					FileFormat:  file.YAML,
+				})
+				if err != nil {
+					log.WithFields(log.Fields{
+						"workspace": ws.Name,
+						"error":     err,
+					}).Error("Error building Kong dump file")
+				} else {
+					log.WithField("workspace", ws.Name).Info("Successfully dumped workspace")
+					filesToZip = append(filesToZip, ws.Name+"-kong-dump.yaml")
 				}
 			}
 		}
 
-		//Add the full info now we know we have it all
+		// Add the full info now we know we have it all
 		finalResponse["summary_info"] = summaryInfo
 
 		jsonBytes, err := json.Marshal(finalResponse)
-
 		if err != nil {
-			log.Error("Error marshalling json:", err)
+			log.WithError(err).Error("Error marshalling KDD data to JSON")
+			return filesToZip, err
 		}
 
 		err = os.WriteFile("KDD.json", jsonBytes, 0644)
 		if err != nil {
-			log.Fatal("Error writing KDD.json")
+			log.WithError(err).Fatal("Error writing KDD.json")
 			return filesToZip, err
-		} else {
-			filesToZip = append(filesToZip, "KDD.json")
 		}
 
-		//Clear workspace slice at this point if not writing dump files, otherwise app will try and add files to zip
-
+		filesToZip = append(filesToZip, "KDD.json")
 		return filesToZip, nil
 	}
 
 	// Handle Konnect mode
+	log.Info("Running in Konnect mode")
 	httpClient := utils.HTTPClient()
 
 	// Setup the Konnect client
-	// since Konnect doesn't use kong-admin-token header, we don't
-	// need to take in additional headers
-	fmt.Printf("deckHeaders %v", deckHeaders)
+	log.WithField("deckHeaders", deckHeaders).Debug("Using deck headers")
 	config := utils.KonnectConfig{
 		ControlPlaneName: controlPlaneName,
 		Token:            deckHeaders[0],
-		// Email:            "",
-		// Password:         "",
-		Address: kongAddr,
+		Address:          kongAddr,
 	}
 
 	// Tack the token on as an auth header
@@ -782,24 +807,28 @@ func getKDD() ([]string, error) {
 
 	client, err := utils.GetKonnectClient(httpClient, config)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err.Error())
+		log.WithError(err).Error("Failed to get Konnect client")
+		return nil, err
 	}
 
 	// Before we do anything, we need to login
 	authResponse, err := client.Auth.LoginV2(ctx, config.Email, config.Password, config.Token)
-	fmt.Printf("Name: %v\nOrg ID: %v\nOrg: %v\nFirstName: %v\nLastName: %v\nFullName: %v\n", authResponse.Name, authResponse.OrganizationID, authResponse.Organization, authResponse.FirstName, authResponse.LastName, authResponse.FullName)
-
 	if err != nil {
-		fmt.Println("XError: ", err.Error())
+		log.WithError(err).Error("Failed to login to Konnect")
 		return nil, err
 	}
 
+	log.WithFields(log.Fields{
+		"name":     authResponse.Name,
+		"orgID":    authResponse.OrganizationID,
+		"org":      authResponse.Organization,
+		"fullName": authResponse.FullName,
+	}).Debug("Authenticated with Konnect")
+
 	var listOpt *konnect.ListOpt
-
 	controlPlanes, _, err := client.RuntimeGroups.List(ctx, listOpt)
-
 	if err != nil {
-		fmt.Println("Error: ", err.Error())
+		log.WithError(err).Error("Failed to list control planes")
 		return nil, err
 	}
 
@@ -807,11 +836,19 @@ func getKDD() ([]string, error) {
 	for _, controlPlane := range controlPlanes {
 		if *controlPlane.Name == controlPlaneName {
 			cpID = *controlPlane.ID
+			log.WithFields(log.Fields{
+				"name": controlPlaneName,
+				"id":   cpID,
+			}).Info("Found control plane")
 		}
 	}
 
-	konnectAddress := kongAddr + "/v2/control-planes/" + cpID + "/core-entities"
+	if cpID == "" {
+		log.WithField("controlPlaneName", controlPlaneName).Error("Control plane not found")
+		return nil, fmt.Errorf("control plane %s not found", controlPlaneName)
+	}
 
+	konnectAddress := kongAddr + "/v2/control-planes/" + cpID + "/core-entities"
 	kongClient, err := utils.GetKongClient(utils.KongClientConfig{
 		Address:    konnectAddress,
 		HTTPClient: httpClient,
@@ -822,14 +859,14 @@ func getKDD() ([]string, error) {
 	})
 
 	if err != nil {
-		fmt.Println("Error: ", err.Error())
+		log.WithError(err).Error("Failed to get Kong client for Konnect")
 		return nil, err
 	}
 
 	dumpConfig.KonnectControlPlane = controlPlaneName
 	rawState, err := dump.Get(ctx, kongClient, dumpConfig)
-
 	if err != nil {
+		log.WithError(err).Error("Failed reading configuration from Kong")
 		return nil, fmt.Errorf("Failed reading configuration from Kong: %w", err)
 	}
 
@@ -841,45 +878,46 @@ func getKDD() ([]string, error) {
 	summaryInfo.TotalUpstreamCount = len(rawState.Upstreams)
 
 	ks, err := state.Get(rawState)
-
 	if err != nil {
+		log.WithError(err).Error("Failed building state")
 		return nil, fmt.Errorf("building state: %w", err)
 	}
 
+	filename := "konnect-" + controlPlaneName + ".yaml"
 	err = file.KongStateToFile(ks, file.WriteConfig{
-		SelectTags: dumpConfig.SelectorTags,
-		Filename:   "konnect" + controlPlaneName + ".yaml",
-		// FileFormat:       file.Format(strings.ToUpper("yaml")),
+		SelectTags:       dumpConfig.SelectorTags,
+		Filename:         filename,
 		FileFormat:       file.YAML,
 		WithID:           true,
 		ControlPlaneName: controlPlaneName,
-		KongVersion:      "3.5.0.0", //placeholder
+		KongVersion:      "3.5.0.0", // placeholder
 	})
 
 	if err != nil {
-		log.Errorf("building Kong dump file: %w", err)
+		log.WithFields(log.Fields{
+			"controlPlane": controlPlaneName,
+			"error":        err,
+		}).Error("Failed building Kong dump file")
 	} else {
-		log.Info("Successfully dumped Control Plane: ", controlPlaneName)
-		filesToZip = append(filesToZip, "konnect"+controlPlaneName+".yaml")
+		log.WithField("controlPlane", controlPlaneName).Info("Successfully dumped Control Plane")
+		filesToZip = append(filesToZip, filename)
 	}
 
 	finalResponse["summary_info"] = summaryInfo
 
 	jsonBytes, err := json.Marshal(finalResponse)
-
 	if err != nil {
-		log.Error("Error marshalling json:", err)
+		log.WithError(err).Error("Error marshalling JSON")
 		return nil, err
 	}
 
 	err = os.WriteFile("KDD.json", jsonBytes, 0644)
 	if err != nil {
-		log.Fatal("Error writing KDD.json")
+		log.WithError(err).Fatal("Error writing KDD.json")
 		return filesToZip, err
-	} else {
-		filesToZip = append(filesToZip, "KDD.json")
 	}
 
+	filesToZip = append(filesToZip, "KDD.json")
 	return filesToZip, nil
 }
 
@@ -890,7 +928,6 @@ func getEndpoint(client *kong.Client, endpoint string) (objx.Map, error) {
 	}
 
 	oReturn, err := getObjx(req, client)
-
 	if err != nil {
 		return nil, err
 	}
@@ -900,16 +937,18 @@ func getEndpoint(client *kong.Client, endpoint string) (objx.Map, error) {
 
 func getObjx(req *http.Request, client *kong.Client) (objx.Map, error) {
 	resp, err := client.DoRAW(context.Background(), req)
-
 	if err != nil {
 		return nil, err
 	}
 
 	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
 	strBody := string(body)
-
 	oReturn, err := objx.FromJSON(strBody)
-
 	if err != nil {
 		return nil, err
 	}
@@ -932,25 +971,29 @@ func getWorkspaces(client *kong.Client) (*Workspaces, error) {
 }
 
 func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string, error) {
-	log.Info("Running Kubernetes")
+	log.Info("Running Kubernetes collection")
 	ctx := context.Background()
 	var kongK8sPods []corev1.Pod
 	var filesToZip []string
 
 	kubeClient, clientConfig, err := createClient()
-
 	if err != nil {
-		log.Error("Unable to create k8s client")
+		log.WithError(err).Error("Unable to create k8s client")
 		return nil, err
 	}
 
 	pl, err := kubeClient.CoreV1().Pods("").List(ctx, v1.ListOptions{})
+	if err != nil {
+		log.WithError(err).Error("Failed to list pods")
+		return nil, err
+	}
 
 	if os.Getenv("TARGET_PODS") != "" {
 		targetPods = strings.Split(os.Getenv("TARGET_PODS"), ",")
+		log.WithField("targetPods", targetPods).Info("Using target pods from environment")
 	}
 
-	//To keep track of whether a particular pod has been added already. As a pod with an ingress-controller image and a kong-gateway image will be added twice to the kongK8sPods slice
+	// To keep track of whether a particular pod has been added already.
 	foundPod := make(map[string]bool)
 
 	for _, p := range pl.Items {
@@ -961,7 +1004,10 @@ func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string
 						for _, i := range kongImages {
 							if strings.Contains(c.Image, i) {
 								if !foundPod[p.Name] {
-									log.Info("Appending: ", p.Name, " with container count: ", len(p.Spec.Containers))
+									log.WithFields(log.Fields{
+										"pod":            p.Name,
+										"containerCount": len(p.Spec.Containers),
+									}).Info("Found target pod")
 									kongK8sPods = append(kongK8sPods, p)
 									foundPod[p.Name] = true
 								}
@@ -975,7 +1021,10 @@ func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string
 				for _, i := range kongImages {
 					if strings.Contains(c.Image, i) {
 						if !foundPod[p.Name] {
-							log.Info("Appending: ", p.Name, " with container count: ", len(p.Spec.Containers))
+							log.WithFields(log.Fields{
+								"pod":            p.Name,
+								"containerCount": len(p.Spec.Containers),
+							}).Info("Found Kong pod")
 							kongK8sPods = append(kongK8sPods, p)
 							foundPod[p.Name] = true
 						}
@@ -986,10 +1035,36 @@ func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string
 	}
 
 	if len(kongK8sPods) > 0 {
+		log.WithField("podCount", len(kongK8sPods)).Info("Processing Kubernetes pods")
+
 		logFilenames, err := writePodDetails(ctx, kubeClient, kongK8sPods)
+		if err != nil {
+			log.WithError(err).Error("Error writing pod details")
+		} else {
+			filesToZip = append(filesToZip, logFilenames...)
+		}
 
 		for _, pod := range kongK8sPods {
+			log.WithFields(log.Fields{
+				"pod":       pod.Name,
+				"namespace": pod.Namespace,
+			}).Info("Processing pod")
+
 			for _, container := range pod.Spec.Containers {
+				relevantImage := false
+				for _, i := range kongImages {
+					if strings.Contains(container.Image, i) {
+						relevantImage = true
+						break
+					}
+				}
+
+				if !relevantImage {
+					continue
+				}
+
+				log.WithField("container", container.Name).Info("Processing container")
+
 				for _, file := range filesToCopy {
 					namedCmd := NamedCommand{
 						Cmd:  []string{"cat", file},
@@ -997,39 +1072,45 @@ func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string
 					}
 
 					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, namedCmd)
-
 					if err != nil {
-						log.Error("Error copying file: ", pod.Name, err.Error())
-					}
-
-					if filename != "" {
+						log.WithFields(log.Fields{
+							"pod":       pod.Name,
+							"container": container.Name,
+							"file":      file,
+							"error":     err,
+						}).Error("Error copying file from pod")
+					} else if filename != "" {
+						log.WithFields(log.Fields{
+							"pod":      pod.Name,
+							"file":     file,
+							"filename": filename,
+						}).Debug("Copied file from pod")
 						filesToZip = append(filesToZip, filename)
 					}
-					fmt.Printf("Copying %s from %s\n", file, pod.Name)
 				}
 
 				for _, namedCmd := range commandsToRun {
 					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, namedCmd)
-
 					if err != nil {
-						log.Error("Error copying file: ", pod.Name, err.Error())
-					}
-
-					if filename != "" {
+						log.WithFields(log.Fields{
+							"pod":       pod.Name,
+							"container": container.Name,
+							"command":   strings.Join(namedCmd.Cmd, " "),
+							"error":     err,
+						}).Error("Error running command in pod")
+					} else if filename != "" {
+						log.WithFields(log.Fields{
+							"pod":      pod.Name,
+							"command":  strings.Join(namedCmd.Cmd, " "),
+							"filename": filename,
+						}).Debug("Command executed in pod")
 						filesToZip = append(filesToZip, filename)
 					}
 				}
 			}
 		}
-
-		if err != nil {
-			log.Error("There was an error writing pod details: ", err.Error())
-		} else {
-			filesToZip = append(filesToZip, logFilenames...)
-		}
-
 	} else {
-		log.Info("No pods with the appropriate container images found in cluster")
+		log.Warn("No pods with the appropriate container images found in cluster")
 	}
 
 	return filesToZip, nil
@@ -1037,32 +1118,35 @@ func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string
 
 func createAndWriteLogFile(initialLogName string, contents string) (string, error) {
 	hostname, _ := os.Hostname()
-
 	logName := fmt.Sprintf(hostname+"_"+initialLogName+"-%s.log", time.Now().Format("2006-01-02-15-04-05"))
 
-	if logFile, err := os.Create(logName); err != nil {
-		log.Error("Cannot create " + initialLogName + " log file.")
+	logFile, err := os.Create(logName)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"initialLogName": initialLogName,
+			"error":          err,
+		}).Error("Cannot create log file")
 		return "", err
-	} else {
+	}
 
-		defer logFile.Close()
+	defer logFile.Close()
 
-		if _, err = io.Copy(logFile, strings.NewReader(contents)); err != nil {
-			log.Error("Unable to write contents to " + initialLogName)
-			return "", err
-		}
-
-		logFile.Close()
+	if _, err = io.Copy(logFile, strings.NewReader(contents)); err != nil {
+		log.WithFields(log.Fields{
+			"initialLogName": initialLogName,
+			"error":          err,
+		}).Error("Unable to write contents to log file")
+		return "", err
 	}
 
 	return logName, nil
 }
 
 func runVM() ([]string, error) {
-	log.Info("Running in VM mode.")
+	log.Info("Running in VM mode")
 
 	if lineLimit == LineLimitDefault {
-		log.Info("Using default line limit value of ", LineLimitDefault)
+		log.WithField("lineLimit", LineLimitDefault).Info("Using default line limit value")
 	}
 
 	var filesToZip []string
@@ -1073,83 +1157,82 @@ func runVM() ([]string, error) {
 	}
 
 	if prefixDir != "" {
-		log.Info("Reading environment file...")
+		log.WithField("prefixDir", prefixDir).Info("Reading environment file")
 
 		d, err := os.ReadFile(prefixDir + "/.kong_env")
-
 		if err != nil {
-			log.Error("Error reading config file")
+			log.WithError(err).Error("Error reading config file")
 			return nil, err
 		}
 
 		configSummary, err := os.Create("vm-kong-env.txt")
-
 		if err != nil {
-			log.Error("Error creating vm-kong-env.txt")
+			log.WithError(err).Error("Error creating vm-kong-env.txt")
 			return nil, err
 		}
 
-		log.Info("Writing kong environment data...")
-
+		log.Info("Writing kong environment data")
 		if _, err = io.Copy(configSummary, bytes.NewReader(d)); err != nil {
-			log.Error(err)
-		}
-
-		if configSummary.Close(); err == nil {
-			filesToZip = append(filesToZip, "vm-kong-env.txt")
-		} else {
-			log.Error("Error closing vm-kong-env.txt")
+			log.WithError(err).Error("Error writing kong environment data")
+			configSummary.Close()
 			return nil, err
 		}
 
-		//meminfo
+		if err = configSummary.Close(); err != nil {
+			log.WithError(err).Error("Error closing vm-kong-env.txt")
+			return nil, err
+		}
+
+		filesToZip = append(filesToZip, "vm-kong-env.txt")
+
+		// Memory info
 		if err := getResourceAndMarshall(RetrieveVMMemoryInfo, "memory", vmMemoryLogFile); err != nil {
-			log.Error("Error retrieving memory info: ", err.Error())
+			log.WithError(err).Error("Error retrieving memory info")
+		} else {
+			filesToZip = append(filesToZip, vmMemoryLogFile)
 		}
 
-		filesToZip = append(filesToZip, vmMemoryLogFile)
-		//meminfo
-
-		//cpuinfo
+		// CPU info
 		if err := getResourceAndMarshall(RetrieveVMCPUInfo, "cpu", vmCPULogFile); err != nil {
-			log.Error("Error retrieving CPU info: ", err.Error())
+			log.WithError(err).Error("Error retrieving CPU info")
+		} else {
+			filesToZip = append(filesToZip, vmCPULogFile)
 		}
 
-		filesToZip = append(filesToZip, vmCPULogFile)
-		//cpuinfo
-
-		//diskinfo
+		// Disk info
 		if err := getResourceAndMarshall(RetrieveVMDiskInfo, "disk", vmDiskLogFile); err != nil {
-			log.Error("Error retrieving disk info: ", err.Error())
+			log.WithError(err).Error("Error retrieving disk info")
+		} else {
+			filesToZip = append(filesToZip, vmDiskLogFile)
 		}
 
-		filesToZip = append(filesToZip, vmDiskLogFile)
-		//diskinfo
-
-		//processinfo
+		// Process info
 		if err := getResourceAndMarshall(RetrieveProcessInfo, "process", vmProcessLogFile); err != nil {
-			log.Error("Error retrieving process info: ", err.Error())
+			log.WithError(err).Error("Error retrieving process info")
+		} else {
+			filesToZip = append(filesToZip, vmProcessLogFile)
 		}
 
-		filesToZip = append(filesToZip, vmProcessLogFile)
-		//processinfo
-
-		//networkinfo
+		// Network info
 		if err := getResourceAndMarshall(RetrieveNetworkInfo, "network", vmNetworkLogFile); err != nil {
-			log.Error("Error retrieving network info: ", err.Error())
+			log.WithError(err).Error("Error retrieving network info")
+		} else {
+			filesToZip = append(filesToZip, vmNetworkLogFile)
 		}
-
-		filesToZip = append(filesToZip, vmNetworkLogFile)
-		//networkinfo
 
 		for _, v := range filesToCopy {
 			if err := copyFiles(v[0], v[1]); err != nil {
-				log.Error("Error copying file: ", err.Error())
+				log.WithFields(log.Fields{
+					"src":   v[0],
+					"dst":   v[1],
+					"error": err,
+				}).Error("Error copying file")
+			} else {
+				filesToZip = append(filesToZip, v[1])
 			}
-			filesToZip = append(filesToZip, v[1])
 		}
 
-		//Config keys that have the paths to log files that need extracting
+		// Config keys that have the paths to log files that need extracting
 		configKeys := []string{"admin_access_log", "admin_error_log", "proxy_access_log", "proxy_error_log"}
 
 		for _, v := range configKeys {
@@ -1159,37 +1242,38 @@ func runVM() ([]string, error) {
 			}
 		}
 	} else {
-		log.Info("No prefix directory set. The prefix parameter must be set for VM log extraction.")
+		log.Warn("No prefix directory set. The prefix parameter must be set for VM log extraction.")
 	}
 
 	return filesToZip, nil
 }
 
 func getResourceAndMarshall(functionName func() (interface{}, error), resourceType string, logFile string) error {
+	log.WithFields(log.Fields{
+		"resourceType": resourceType,
+		"logFile":      logFile,
+	}).Debug("Retrieving and marshalling resource")
+
 	resource, err := functionName()
 	if err != nil {
-		log.Error("Error retrieving ", resourceType, " info: ", err.Error())
 		return err
 	}
 
 	infoJSON, err := json.Marshal(resource)
-
 	if err != nil {
-		log.Error("Error marshalling memory info: ", err.Error())
 		return err
 	}
 
 	err = os.WriteFile(logFile, infoJSON, 0644)
 	if err != nil {
-		log.Error("Error writing process info: ", err.Error())
 		return err
 	}
 
 	return nil
-
 }
 
 func collectAndLimitLog(envars, configKey string) string {
+	log.WithField("configKey", configKey).Debug("Collecting and limiting log")
 
 	splitEnvars := strings.Split(envars, "\n")
 
@@ -1197,110 +1281,125 @@ func collectAndLimitLog(envars, configKey string) string {
 		if strings.Contains(configLine, configKey) {
 			logPath := getConfigValue(configLine)
 
+			if logPath == "" {
+				log.WithField("configKey", configKey).Warn("Empty log path found, skipping")
+				continue
+			}
+
 			var logLines []string
 
 			if logPath[:4] == "logs" {
-				log.Info("Using prefix for log path: ", prefixDir+"/"+logPath)
-				logPath = prefixDir + "/" + logPath
+				fullLogPath := prefixDir + "/" + logPath
+				log.WithFields(log.Fields{
+					"prefix":   prefixDir,
+					"logPath":  logPath,
+					"fullPath": fullLogPath,
+				}).Debug("Using prefix for log path")
+				logPath = fullLogPath
 			}
 
-			//Get file length in bytes
+			// Get file length in bytes
 			logLength := getFileLength(logPath)
+			if logLength <= 0 {
+				log.WithField("logPath", logPath).Info("Log file has no length, continuing...")
+				continue
+			}
 
-			log.Info("Log file length in bytes:", logLength)
+			log.WithFields(log.Fields{
+				"path":   logPath,
+				"length": logLength,
+			}).Debug("Log file information")
 
-			done := false
+			logFile, err := os.Open(logPath)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"logPath": logPath,
+					"error":   err,
+				}).Error("Error opening log")
+				continue
+			}
 
-			if logLength > 0 {
+			defer logFile.Close()
 
-				//Read bytes 1 by 1 until a new line character is found, then all previous bytes become a line
-				if logFile, err := os.Open(logPath); err != nil {
-					log.Error("Error opening log: ", err.Error())
-				} else {
+			singleByteBuffer := make([]byte, 1)
+			var singleLineBytes []byte
+			linesProcessed := int64(0)
+			bytesProcessed := int64(0)
+			success := false
 
-					defer logFile.Close()
+			for {
+				if bytesProcessed >= logLength || linesProcessed >= lineLimit {
+					break
+				}
 
-					singleByteBuffer := make([]byte, 1)
-					var singleLineBytes []byte
-					linesProcessed := int64(0)
-					bytesProcessed := int64(0)
-					success := false
+				if _, err := logFile.ReadAt(singleByteBuffer, logLength-bytesProcessed-1); err != nil {
+					if err != io.EOF {
+						log.WithFields(log.Fields{
+							"logPath": logPath,
+							"error":   err,
+						}).Error("Unable to read a byte from log file")
+					}
+					break
+				}
 
-					for {
-						if done {
-							break
-						}
+				lastReadByte := singleByteBuffer[0]
+				bytesProcessed++
 
-						if _, err := logFile.ReadAt(singleByteBuffer, logLength-bytesProcessed-1); err != nil && err != io.EOF {
-							log.Error("Unable to read a byte from: ", logPath)
-							log.Error(err.Error())
-							done = true
-						} else if err == io.EOF {
-							log.Info("Hit the end of the file.")
-
-							done = true
-
-						} else {
-							lastReadByte := singleByteBuffer[0]
-							bytesProcessed += 1
-							//Check for /n byte. No support for /r/n yet.
-							if lastReadByte == 10 {
-
-								for i, j := 0, len(singleLineBytes)-1; i < j; i, j = i+1, j-1 {
-									singleLineBytes[i], singleLineBytes[j] = singleLineBytes[j], singleLineBytes[i]
-								}
-
-								logLines = append(logLines, string(singleLineBytes[:]))
-
-								singleLineBytes = make([]byte, 0)
-								linesProcessed += 1
-								success = true
-							} else {
-								singleLineBytes = append(singleLineBytes, lastReadByte)
-							}
-
-							if linesProcessed == lineLimit {
-								done = true
-							}
-
-						}
+				// Check for \n byte. No support for \r\n yet.
+				if lastReadByte == 10 {
+					// Reverse the line since we're reading backwards
+					for i, j := 0, len(singleLineBytes)-1; i < j; i, j = i+1, j-1 {
+						singleLineBytes[i], singleLineBytes[j] = singleLineBytes[j], singleLineBytes[i]
 					}
 
-					if success {
+					logLines = append(logLines, string(singleLineBytes[:]))
+					singleLineBytes = make([]byte, 0)
+					linesProcessed++
+					success = true
+				} else {
+					singleLineBytes = append(singleLineBytes, lastReadByte)
+				}
+			}
 
-						//Flip the lines as they are read backwards
-						for i, j := 0, len(logLines)-1; i < j; i, j = i+1, j-1 {
-							logLines[i], logLines[j] = logLines[j], logLines[i]
-						}
+			if success {
+				// Flip the lines as they are read backwards
+				for i, j := 0, len(logLines)-1; i < j; i, j = i+1, j-1 {
+					logLines[i], logLines[j] = logLines[j], logLines[i]
+				}
 
-						sanitizedLogLines := logLines
-
-						if len(strToRedact) > 0 {
-							for i, v := range logLines {
-								sanitizedLogLines[i] = analyseLogLineForRedaction(v)
-							}
-						}
-
-						concatLogs := fmt.Sprintf(strings.Join(sanitizedLogLines, "\n"))
-
-						if len(concatLogs) > 0 {
-							if logName, err := createAndWriteLogFile(configKey, concatLogs); err != nil {
-								log.Error("Error creating or writing log file: ", err.Error())
-							} else {
-								log.Info(configKey+" log successfully created: ", logName)
-
-								return logName
-							}
-						} else {
-							log.Info("Skipping creation of " + configKey + " logs as the log either does not exist or has no length.")
-						}
-
-						log.Info("Finished reading Log. Lines written: ", len(sanitizedLogLines))
+				sanitizedLogLines := logLines
+				if len(strToRedact) > 0 {
+					for i, v := range logLines {
+						sanitizedLogLines[i] = analyseLogLineForRedaction(v)
 					}
 				}
-			} else {
-				log.Info("Log file has no length, continuing...")
+
+				concatLogs := strings.Join(sanitizedLogLines, "\n")
+				if len(concatLogs) > 0 {
+					logName, err := createAndWriteLogFile(configKey, concatLogs)
+					if err != nil {
+						log.WithFields(log.Fields{
+							"configKey": configKey,
+							"error":     err,
+						}).Error("Error creating or writing log file")
+					} else {
+						log.WithFields(log.Fields{
+							"configKey": configKey,
+							"logName":   logName,
+						}).Info("Log file successfully created")
+						return logName
+					}
+				} else {
+					log.WithField("configKey", configKey).Info("Skipping creation of logs as the log either does not exist or has no length")
+				}
+
+				log.WithFields(log.Fields{
+					"configKey":  configKey,
+					"linesCount": len(sanitizedLogLines),
+				}).Info("Finished reading log")
 			}
+
+			logFile.Close()
 		}
 	}
 
@@ -1309,26 +1408,41 @@ func collectAndLimitLog(envars, configKey string) string {
 
 func getConfigValue(entry string) string {
 	aEntry := strings.Split(entry, "=")
+	if len(aEntry) < 2 {
+		return ""
+	}
 	return strings.Trim(aEntry[1], " ")
 }
 
 // Returns total length of byte array
 func getFileLength(logPath string) int64 {
-	log.Info("Getting log length for: ", logPath)
+	log.WithField("path", logPath).Debug("Getting log file length")
 	size := int64(0)
 
-	if fileInfo, err := os.Stat(logPath); err != nil {
-		log.Error("Error reading file info ", err.Error())
-	} else {
-		size = fileInfo.Size()
-		log.Info(logPath, " length is: ", size)
+	fileInfo, err := os.Stat(logPath)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"path":  logPath,
+			"error": err,
+		}).Error("Error reading file info")
+		return 0
 	}
+
+	size = fileInfo.Size()
+	log.WithFields(log.Fields{
+		"path": logPath,
+		"size": size,
+	}).Debug("File size determined")
 
 	return size
 }
 
 func createClient() (kubernetes.Interface, *rest.Config, error) {
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{})
+	log.Debug("Creating Kubernetes client")
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(),
+		&clientcmd.ConfigOverrides{},
+	)
 
 	clientConfig, err := kubeConfig.ClientConfig()
 	if err != nil {
@@ -1345,109 +1459,109 @@ func createClient() (kubernetes.Interface, *rest.Config, error) {
 
 func writePodDetails(ctx context.Context, clientSet kubernetes.Interface, podList []corev1.Pod) ([]string, error) {
 	var logFilenames []string
+
 	for _, pod := range podList {
 		p, err := clientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 		if err != nil {
-			log.Error(err)
-			//return logFilenames, err
+			log.WithFields(log.Fields{
+				"pod":       pod.Name,
+				"namespace": pod.Namespace,
+				"error":     err,
+			}).Error("Error getting pod details")
 			continue
 		}
 
-		log.Info("Working on Pod: ", p.Name, " in namespace: ", p.Namespace)
+		log.WithFields(log.Fields{
+			"pod":       p.Name,
+			"namespace": p.Namespace,
+		}).Info("Processing pod details")
 
 		for _, container := range p.Spec.Containers {
-
 			relevantImage := false
-
 			for _, i := range kongImages {
 				if strings.Contains(container.Image, i) {
 					relevantImage = true
+					break
 				}
 			}
 
-			if relevantImage {
-				log.Info("Working on container: ", container.Name)
-
-				if os.Getenv("K8S_LOGS_SINCE_SECONDS") != "" {
-					logsSinceSeconds, err = strconv.ParseInt(os.Getenv("K8S_LOGS_SINCE_SECONDS"), 10, 64)
-				}
-
-				podLogOpts := corev1.PodLogOptions{}
-
-				if logsSinceSeconds > 0 {
-					podLogOpts = corev1.PodLogOptions{Container: container.Name, SinceSeconds: &logsSinceSeconds}
-				} else {
-					podLogOpts = corev1.PodLogOptions{Container: container.Name, TailLines: &lineLimit}
-				}
-
-				podLogs, err := clientSet.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts).Stream(ctx)
-
-				if err != nil {
-					log.Error("Error retrieving pod logs:", err.Error())
-					//return logFilenames, err
-					continue
-				}
-
-				sanitizedImageName := strings.ReplaceAll(strings.ReplaceAll(container.Image, ":", "/"), "/", "-")
-				logsFilename := fmt.Sprintf("%s-%s.log", pod.Name, sanitizedImageName)
-
-				logFile, err := os.Create(logsFilename)
-				defer logFile.Close()
-
-				if err != nil {
-					log.Error("Error creating log file:", err.Error())
-					continue
-				}
-
-				if len(strToRedact) > 0 {
-					buf := bufio.NewScanner(podLogs)
-
-					for buf.Scan() {
-
-						bytes := buf.Bytes()
-
-						sanitizedLogLine := analyseLogLineForRedaction(string(bytes) + "\n")
-
-						_, err = io.Copy(logFile, strings.NewReader(sanitizedLogLine))
-						if err != nil {
-							log.Error("Unable to write container logs: ", err)
-							continue
-							//return err
-						}
-					}
-				} else {
-					_, err = io.Copy(logFile, podLogs)
-					if err != nil {
-						log.Error(err)
-						//return logFilenames, err
-						continue
-					}
-				}
-
-				err = podLogs.Close()
-				if err != nil {
-					log.Error(err)
-					//return logFilenames, err
-					continue
-				}
-
-				err = logFile.Close()
-				if err != nil {
-					log.Error(err)
-					//return logFilenames, err
-					continue
-				}
-
-				logFilenames = append(logFilenames, logsFilename)
+			if !relevantImage {
+				continue
 			}
+
+			log.WithField("container", container.Name).Info("Processing container logs")
+
+			if os.Getenv("K8S_LOGS_SINCE_SECONDS") != "" {
+				var err error
+				logsSinceSeconds, err = strconv.ParseInt(os.Getenv("K8S_LOGS_SINCE_SECONDS"), 10, 64)
+				if err != nil {
+					log.WithError(err).Warn("Invalid K8S_LOGS_SINCE_SECONDS value, using default")
+				}
+			}
+
+			podLogOpts := corev1.PodLogOptions{Container: container.Name}
+			if logsSinceSeconds > 0 {
+				podLogOpts.SinceSeconds = &logsSinceSeconds
+				log.WithField("sinceSeconds", logsSinceSeconds).Debug("Using time-based log retrieval")
+			} else {
+				podLogOpts.TailLines = &lineLimit
+				log.WithField("tailLines", lineLimit).Debug("Using line-based log retrieval")
+			}
+
+			podLogs, err := clientSet.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts).Stream(ctx)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"pod":       pod.Name,
+					"container": container.Name,
+					"error":     err,
+				}).Error("Error retrieving pod logs")
+				continue
+			}
+
+			sanitizedImageName := strings.ReplaceAll(strings.ReplaceAll(container.Image, ":", "/"), "/", "-")
+			logsFilename := fmt.Sprintf("%s-%s.log", pod.Name, sanitizedImageName)
+
+			logFile, err := os.Create(logsFilename)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"filename": logsFilename,
+					"error":    err,
+				}).Error("Error creating log file")
+				podLogs.Close()
+				continue
+			}
+
+			if len(strToRedact) > 0 {
+				buf := bufio.NewScanner(podLogs)
+				for buf.Scan() {
+					bytes := buf.Bytes()
+					sanitizedLogLine := analyseLogLineForRedaction(string(bytes) + "\n")
+					if _, err := io.Copy(logFile, strings.NewReader(sanitizedLogLine)); err != nil {
+						log.WithError(err).Error("Unable to write container logs")
+						break
+					}
+				}
+			} else {
+				if _, err := io.Copy(logFile, podLogs); err != nil {
+					log.WithError(err).Error("Error copying pod logs to file")
+					logFile.Close()
+					podLogs.Close()
+					continue
+				}
+			}
+
+			podLogs.Close()
+			logFile.Close()
+			logFilenames = append(logFilenames, logsFilename)
 		}
 
 		podDefFileName := fmt.Sprintf("%s.yaml", p.Name)
 		podDefFile, err := os.Create(podDefFileName)
-		defer podDefFile.Close()
-
 		if err != nil {
-			log.Error(err)
+			log.WithFields(log.Fields{
+				"filename": podDefFileName,
+				"error":    err,
+			}).Error("Error creating pod definition file")
 			continue
 		}
 
@@ -1456,52 +1570,73 @@ func writePodDetails(ctx context.Context, clientSet kubernetes.Interface, podLis
 			Kind:       "Pod",
 			APIVersion: "v1",
 		}
-		scheme := runtime.NewScheme()
-		serializer := kjson.NewSerializerWithOptions(kjson.DefaultMetaFactory, scheme, scheme, kjson.SerializerOptions{
-			Pretty: true,
-			Yaml:   true,
-			Strict: true,
-		})
-		err = serializer.Encode(&pod, buf)
 
+		scheme := runtime.NewScheme()
+		serializer := kjson.NewSerializerWithOptions(
+			kjson.DefaultMetaFactory,
+			scheme,
+			scheme,
+			kjson.SerializerOptions{
+				Pretty: true,
+				Yaml:   true,
+				Strict: true,
+			},
+		)
+
+		err = serializer.Encode(&pod, buf)
 		if err != nil {
-			log.Println(err)
+			log.WithError(err).Error("Error encoding pod definition")
+			podDefFile.Close()
 			continue
 		}
 
 		_, err = io.Copy(podDefFile, buf)
 		if err != nil {
-			log.Println(err)
+			log.WithError(err).Error("Error writing pod definition")
+			podDefFile.Close()
 			continue
 		}
 
+		podDefFile.Close()
 		logFilenames = append(logFilenames, podDefFileName)
 	}
+
 	return logFilenames, nil
 }
 
 func writeFiles(filesToWrite []string) error {
-	output, err := os.Create(fmt.Sprintf("%s-support.tar.gz", time.Now().Format("2006-01-02-15-04-05")))
+	if len(filesToWrite) == 0 {
+		log.Warn("No files to write to archive")
+		return nil
+	}
+
+	outputName := fmt.Sprintf("%s-support.tar.gz", time.Now().Format("2006-01-02-15-04-05"))
+	log.WithField("filename", outputName).Info("Creating archive")
+
+	output, err := os.Create(outputName)
 	if err != nil {
+		log.WithError(err).Error("Failed to create output file")
 		return err
 	}
+
 	defer func() {
-		if tempErr := output.Close(); tempErr != nil {
-			err = tempErr
+		if err := output.Close(); err != nil {
+			log.WithError(err).Error("Error closing output file")
 		}
 	}()
 
-	// Create the archive and write the output to the "out" Writer
+	// Create the archive and write the output
 	gw := gzip.NewWriter(output)
 	defer func() {
-		if tempErr := gw.Close(); tempErr != nil {
-			err = tempErr
+		if err := gw.Close(); err != nil {
+			log.WithError(err).Error("Error closing gzip writer")
 		}
 	}()
+
 	tw := tar.NewWriter(gw)
 	defer func() {
-		if tempErr := tw.Close(); tempErr != nil {
-			err = tempErr
+		if err := tw.Close(); err != nil {
+			log.WithError(err).Error("Error closing tar writer")
 		}
 	}()
 
@@ -1509,29 +1644,39 @@ func writeFiles(filesToWrite []string) error {
 	for _, file := range filesToWrite {
 		err := addToArchive(tw, file)
 		if err != nil {
+			log.WithFields(log.Fields{
+				"file":  file,
+				"error": err,
+			}).Error("Error adding file to archive")
 			return err
 		}
 	}
 
-	log.Info("Diagnostics have been written to: ", output.Name())
-	err = cleanupFiles(filesToWrite)
+	log.WithField("filename", output.Name()).Info("Diagnostics have been written to archive")
 
+	err = cleanupFiles(filesToWrite)
 	if err != nil {
-		log.Error(err)
+		log.WithError(err).Error("Error cleaning up files")
 	}
 
 	return nil
 }
 
 func addToArchive(tw *tar.Writer, filename string) error {
+	log.WithField("filename", filename).Debug("Adding file to archive")
+
 	// Open the file which will be written into the archive
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
+
 	defer func() {
-		if tempErr := file.Close(); tempErr != nil {
-			err = tempErr
+		if err := file.Close(); err != nil {
+			log.WithFields(log.Fields{
+				"filename": filename,
+				"error":    err,
+			}).Error("Error closing file")
 		}
 	}()
 
@@ -1548,9 +1693,6 @@ func addToArchive(tw *tar.Writer, filename string) error {
 	}
 
 	// Use full path as name (FileInfoHeader only takes the basename)
-	// If we don't do this the directory structure would
-	// not be preserved
-	// https://golang.org/src/archive/tar/common.go?#L626
 	header.Name = filename
 
 	// Write file header to the tar archive
@@ -1573,6 +1715,7 @@ func roundToTwoDecimals(num float64) float64 {
 }
 
 func RetrieveNetworkInfo() (interface{}, error) {
+	log.Debug("Retrieving network information")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1580,6 +1723,7 @@ func RetrieveNetworkInfo() (interface{}, error) {
 	conn, err := net.ConnectionsWithContext(ctx, "all")
 
 	if err != nil {
+		log.WithError(err).Error("Failed to retrieve network connections")
 		return NetworkInfo{}, err
 	}
 
@@ -1596,10 +1740,11 @@ func RetrieveNetworkInfo() (interface{}, error) {
 		})
 	}
 
-	return netStats, err
+	return netStats, nil
 }
 
 func RetrieveProcessInfo() (interface{}, error) {
+	log.Debug("Retrieving process information")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -1607,29 +1752,46 @@ func RetrieveProcessInfo() (interface{}, error) {
 	processes, err := process.ProcessesWithContext(ctx)
 
 	if err != nil {
+		log.WithError(err).Error("Failed to retrieve processes")
 		return ProcessInfo{}, err
 	}
 
 	for _, p := range processes {
 		name, err := p.NameWithContext(ctx)
 		if err != nil {
-			return ProcessInfo{}, err
+			log.WithFields(log.Fields{
+				"pid":   p.Pid,
+				"error": err,
+			}).Debug("Failed to get process name")
+			continue
 		}
 
 		pid := p.Pid
 		cpuPercent, err := p.CPUPercentWithContext(ctx)
 		if err != nil {
-			return ProcessInfo{}, err
+			log.WithFields(log.Fields{
+				"pid":   p.Pid,
+				"error": err,
+			}).Debug("Failed to get process CPU usage")
+			continue
 		}
 
 		memInfo, err := p.MemoryInfoWithContext(ctx)
 		if err != nil {
-			return ProcessInfo{}, err
+			log.WithFields(log.Fields{
+				"pid":   p.Pid,
+				"error": err,
+			}).Debug("Failed to get process memory info")
+			continue
 		}
 
 		cmdLine, err := p.CmdlineWithContext(ctx)
 		if err != nil {
-			return ProcessInfo{}, err
+			log.WithFields(log.Fields{
+				"pid":   p.Pid,
+				"error": err,
+			}).Debug("Failed to get process command line")
+			continue
 		}
 
 		ps = append(ps, ProcessInfo{
@@ -1644,33 +1806,39 @@ func RetrieveProcessInfo() (interface{}, error) {
 }
 
 func RetrieveVMDiskInfo() (interface{}, error) {
-	var bytesToGB uint64
-	bytesToGB = 1024 * 1024 * 1024
+	log.Debug("Retrieving VM disk information")
+	var bytesToGB uint64 = 1024 * 1024 * 1024
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
 	defer cancel()
 
 	diskinfo, err := disk.UsageWithContext(ctx, "/")
 	if err != nil {
+		log.WithError(err).Error("Failed to retrieve disk usage")
 		return DiskInfo{}, err
 	}
+
 	return DiskInfo{
 		Total:       diskinfo.Total / bytesToGB,
-		Free:        diskinfo.Free / 1024 / 1024 / 1024,
-		Used:        diskinfo.Used / 1024 / 1024 / 1024,
+		Free:        diskinfo.Free / bytesToGB,
+		Used:        diskinfo.Used / bytesToGB,
 		UsedPercent: diskinfo.UsedPercent,
 	}, nil
 }
 
 func RetrieveVMCPUInfo() (interface{}, error) {
+	log.Debug("Retrieving VM CPU information")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
 	defer cancel()
 
 	cpuinfo, err := cpu.InfoWithContext(ctx)
 	if err != nil {
-		fmt.Println("Error: ", err.Error())
+		log.WithError(err).Error("Failed to retrieve CPU information")
 		return CPUInfo{}, err
+	}
+
+	if len(cpuinfo) == 0 {
+		log.Warn("No CPU info retrieved")
+		return CPUInfo{}, fmt.Errorf("no CPU information available")
 	}
 
 	return CPUInfo{
@@ -1680,19 +1848,20 @@ func RetrieveVMCPUInfo() (interface{}, error) {
 }
 
 func RetrieveVMMemoryInfo() (interface{}, error) {
+	log.Debug("Retrieving VM memory information")
 	bytesToGB := 1024.0 * 1024.0 * 1024.0
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
 	defer cancel()
 
 	memInfo, err := mem.VirtualMemoryWithContext(ctx)
 	if err != nil {
+		log.WithError(err).Error("Failed to retrieve virtual memory info")
 		return MemoryInfo{}, err
 	}
 
 	swapMem, err := mem.SwapMemory()
-
 	if err != nil {
+		log.WithError(err).Error("Failed to retrieve swap memory info")
 		return MemoryInfo{}, err
 	}
 
@@ -1705,25 +1874,25 @@ func RetrieveVMMemoryInfo() (interface{}, error) {
 }
 
 func copyFiles(srcFile string, dstFile string) error {
+	log.WithFields(log.Fields{
+		"src": srcFile,
+		"dst": dstFile,
+	}).Debug("Copying file")
+
 	sourceFile, err := os.Open(srcFile)
 	if err != nil {
-		log.Error("Error opening source file: ", err)
 		return err
 	}
-
 	defer sourceFile.Close()
 
 	destinationFile, err := os.Create(dstFile)
 	if err != nil {
-		log.Error("Error creating destination file: ", err)
 		return err
 	}
-
 	defer destinationFile.Close()
 
 	_, err = io.Copy(destinationFile, sourceFile)
 	if err != nil {
-		log.Error("Error copying file: ", err)
 		return err
 	}
 
@@ -1731,20 +1900,22 @@ func copyFiles(srcFile string, dstFile string) error {
 }
 
 func WriteOutputToFile(filename string, data []byte) error {
+	log.WithField("filename", filename).Debug("Writing output to file")
 	err := os.WriteFile(filename, data, 0644)
-
 	if err != nil {
-		log.Error("Error writing file: ", err)
 		return err
 	}
-
 	return nil
-
 }
 
-func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID string, commands []NamedCommand) (filesToWrite []string, err error) {
+func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID string, commands []NamedCommand) ([]string, error) {
+	var filesToWrite []string
+
 	for _, nc := range commands {
-		log.Info("Running command: %s", strings.Join(nc.Cmd, " "))
+		log.WithFields(log.Fields{
+			"containerID": containerID,
+			"command":     strings.Join(nc.Cmd, " "),
+		}).Debug("Running command in container")
 
 		config := container.ExecOptions{
 			Cmd:          nc.Cmd,
@@ -1756,31 +1927,41 @@ func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID
 		}
 
 		execID, err := cli.ContainerExecCreate(ctx, containerID, config)
-
 		if err != nil {
-			log.Error("Error creating exec: ", err)
-			return nil, err
+			log.WithFields(log.Fields{
+				"containerID": containerID,
+				"command":     strings.Join(nc.Cmd, " "),
+				"error":       err,
+			}).Error("Error creating exec")
+			continue
 		}
 
 		resp, err := cli.ContainerExecAttach(ctx, execID.ID, container.ExecStartOptions{})
-
-		defer resp.Close()
-
 		if err != nil {
-			log.Error("Error attaching to exec: ", err)
-			return nil, err
+			log.WithFields(log.Fields{
+				"containerID": containerID,
+				"execID":      execID.ID,
+				"error":       err,
+			}).Error("Error attaching to exec")
+			continue
 		}
 
 		output, err := decodeDockerMultiplexedStream(resp.Reader)
 		if err != nil {
-			log.Error("Error decoding multiplexed stream: ", err)
-			return nil, err
+			log.WithError(err).Error("Error decoding multiplexed stream")
+			resp.Close()
+			continue
 		}
+
+		resp.Close()
 
 		err = WriteOutputToFile(nc.Name, output)
 		if err != nil {
-			log.Error("Error writing output to file: ", err)
-			return nil, err
+			log.WithFields(log.Fields{
+				"filename": nc.Name,
+				"error":    err,
+			}).Error("Error writing output to file")
+			continue
 		}
 
 		filesToWrite = append(filesToWrite, nc.Name)
@@ -1803,7 +1984,6 @@ func decodeDockerMultiplexedStream(reader io.Reader) ([]byte, error) {
 		}
 
 		size := binary.BigEndian.Uint32(header[4:])
-
 		payload := make([]byte, size)
 		_, err = io.ReadFull(reader, payload)
 
@@ -1817,55 +1997,68 @@ func decodeDockerMultiplexedStream(reader io.Reader) ([]byte, error) {
 	return output, nil
 }
 
-func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerID string, files []string) (filesToWrite []string, err error) {
-	fmt.Println("Copying files from container: ", containerID)
+func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerID string, files []string) ([]string, error) {
+	log.WithFields(log.Fields{
+		"containerID": containerID,
+		"fileCount":   len(files),
+	}).Debug("Copying files from container")
+
+	var filesToWrite []string
 
 	for _, file := range files {
-		fmt.Println("Copying file: ", file)
-		reader, _, err := cli.CopyFromContainer(ctx, containerID, file)
+		log.WithFields(log.Fields{
+			"containerID": containerID,
+			"file":        file,
+		}).Debug("Copying file from container")
 
+		reader, _, err := cli.CopyFromContainer(ctx, containerID, file)
 		if err != nil {
-			log.Error("Error copying file: ",
-				file, " from container: ", containerID, " error: ", err)
-			return nil, err
+			log.WithFields(log.Fields{
+				"containerID": containerID,
+				"file":        file,
+				"error":       err,
+			}).Error("Error copying file from container")
+			continue
 		}
 
 		tarReader := tar.NewReader(reader)
-
 		for {
 			header, err := tarReader.Next()
-
 			if err == io.EOF {
 				break
 			}
 
 			if err != nil {
-				log.Error("Error reading tar file: ", err)
-				return nil, err
+				log.WithError(err).Error("Error reading tar file")
+				break
 			}
 
 			outFile, err := os.Create(header.Name)
-
 			if err != nil {
-				log.Error("Error creating file: ", err)
-				return nil, err
+				log.WithFields(log.Fields{
+					"filename": header.Name,
+					"error":    err,
+				}).Error("Error creating file")
+				continue
 			}
 
 			filesToWrite = append(filesToWrite, header.Name)
 
-			defer outFile.Close()
-
 			_, err = io.Copy(outFile, tarReader)
-
 			if err != nil {
-				log.Error("Error copying file: ",
-					header.Name, " from container: ", containerID, " error: ", err)
-				return nil, err
-
+				log.WithFields(log.Fields{
+					"filename": header.Name,
+					"error":    err,
+				}).Error("Error copying file content")
+				outFile.Close()
+				continue
 			}
-		}
 
+			outFile.Close()
+		}
+		reader.Close()
 	}
+
 	return filesToWrite, nil
 }
 
@@ -1877,14 +2070,13 @@ func RunCommandInPod(
 	pod string,
 	container string,
 	namedCmd NamedCommand) (string, error) {
-	exe, err := os.Executable()
 
-	if err != nil {
-		log.Error("Error getting executable path: ", err)
-	}
-
-	exePath := filepath.Dir(exe)
-	fmt.Printf("Executable path: %s\n", exePath)
+	log.WithFields(log.Fields{
+		"namespace": namespace,
+		"pod":       pod,
+		"container": container,
+		"command":   strings.Join(namedCmd.Cmd, " "),
+	}).Debug("Running command in pod")
 
 	req := clientset.CoreV1().RESTClient().
 		Post().
@@ -1898,16 +2090,18 @@ func RunCommandInPod(
 		Param("stderr", "true")
 
 	for _, c := range namedCmd.Cmd {
-		log.Info("Adding command: ", c)
 		req.Param("command", c)
 	}
 
-	// Param("command", srcFile).
-
 	exec, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
-
 	if err != nil {
-		log.Error("Error creating executor")
+		log.WithFields(log.Fields{
+			"namespace": namespace,
+			"pod":       pod,
+			"container": container,
+			"error":     err,
+		}).Error("Error creating executor")
+		return "", err
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1917,19 +2111,25 @@ func RunCommandInPod(
 	})
 
 	if err != nil {
-		log.Warning("Error streaming stdout: ", err)
+		log.WithFields(log.Fields{
+			"namespace": namespace,
+			"pod":       pod,
+			"container": container,
+			"error":     err,
+			"stderr":    stderr.String(),
+		}).Warning("Error streaming command output")
 		return "", err
 	}
 
-	// dstFile := container + "-" + strings.Replace(cmd[0]+cmd[1], "/", "-", -1)
 	sanitizedName := strings.ReplaceAll(namedCmd.Name, "/", "-")
 	dstFile := fmt.Sprintf("%s-%s.log", container, sanitizedName)
 
-	// log.Info("Copying file: ", cmd[1], " to: ", exePath+"/"+dstFile)
-
 	err = WriteOutputToFile(dstFile, stdout.Bytes())
 	if err != nil {
-		log.Error("Error writing file: ", err)
+		log.WithFields(log.Fields{
+			"filename": dstFile,
+			"error":    err,
+		}).Error("Error writing file")
 		return "", err
 	}
 
@@ -1940,13 +2140,17 @@ func cleanupFiles(filesToCleanup []string) error {
 	var failed bool
 
 	for _, file := range filesToCleanup {
+		log.WithField("file", file).Debug("Cleaning up file")
 		err := os.Remove(file)
 		if err != nil {
-			log.Error("Error removing file: ", file)
+			log.WithFields(log.Fields{
+				"file":  file,
+				"error": err,
+			}).Error("Error removing file")
 			failed = true
-			continue
 		}
 	}
+
 	if failed {
 		return errors.New("Some files could not be removed and may require manual deletion")
 	}
@@ -1957,6 +2161,7 @@ func cleanupFiles(filesToCleanup []string) error {
 func parseHeaders(headers []string) (http.Header, error) {
 	res := http.Header{}
 	const splitLen = 2
+
 	for _, keyValue := range headers {
 		split := strings.SplitN(keyValue, ":", 2)
 		if len(split) >= splitLen {
@@ -1965,6 +2170,7 @@ func parseHeaders(headers []string) (http.Header, error) {
 			return nil, fmt.Errorf("splitting header key-value '%s'", keyValue)
 		}
 	}
+
 	return res, nil
 }
 
@@ -2104,8 +2310,6 @@ type Workspaces struct {
 	} `json:"data"`
 	Next interface{} `json:"next"`
 }
-
-// TODO: add KonnectSummaryInfo struct
 
 type SummaryInfo struct {
 	DatabaseType               string `json:"database_type"`
