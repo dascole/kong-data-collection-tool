@@ -37,6 +37,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kong/go-database-reconciler/pkg/konnect"
+
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
@@ -83,6 +85,7 @@ const (
 var (
 	rType                      string
 	konnectMode                bool
+	controlPlaneName           string
 	kongImages                 []string
 	deckHeaders                []string
 	targetPods                 []string
@@ -94,6 +97,7 @@ var (
 	clientTimeout              time.Duration
 	rootConfig                 objx.Map
 	kongAddr                   string
+	dumpConfig                 dump.Config
 	createWorkspaceConfigDumps bool
 	disableKDDCollection       bool
 	strToRedact                []string
@@ -273,6 +277,7 @@ var (
 
 func init() {
 	rootCmd.AddCommand(collectCmd)
+	collectCmd.PersistentFlags().StringVarP(&controlPlaneName, "konnect-control-plane-name", "c", "", "Konnect Control Plane name.")
 	collectCmd.PersistentFlags().StringVarP(&rType, "runtime", "r", "", "Runtime to extract logs from (kubernetes or docker). Runtime is auto detected if omitted.")
 	collectCmd.PersistentFlags().BoolVarP(&konnectMode, "konnect-mode", "x", false, "Enables Konnect mode. This will use the Konnect API to collect data.")
 	collectCmd.PersistentFlags().StringSliceVarP(&kongImages, "target-images", "i", defaultKongImageList, `Override default gateway images to scrape logs from. Default: "kong-gateway","kubernetes-ingress-controller"`)
@@ -584,6 +589,7 @@ func getKDD() ([]string, error) {
 
 	//Generate Workspace Dumps
 
+	ctx := context.Background()
 	var summaryInfo SummaryInfo
 	var finalResponse = make(map[string]interface{})
 	var filesToZip []string
@@ -601,14 +607,6 @@ func getKDD() ([]string, error) {
 	if os.Getenv("RBAC_HEADER") != "" {
 		deckHeaders = strings.Split(os.Getenv("RBAC_HEADER"), ",")
 	}
-
-	// if konnectMode {
-	// 	fmt.Printf("#### KONNECT.\n")
-	// 	return nil, nil
-	// } else {
-	// 	fmt.Printf("### ON PREM.\n")
-	// 	return nil, nil
-	// }
 
 	if !konnectMode {
 		// Get the Kong client
@@ -760,19 +758,129 @@ func getKDD() ([]string, error) {
 		return filesToZip, nil
 	}
 
-	fmt.Printf("Konnect mode enabled. Using token: %s\n", deckHeaders)
 	// Handle Konnect mode
-	// config := utils.KonnectConfig{
-	// 	ControlPlaneName: "default",
-	// 	// Token: "kpat_0VmzJakBVl013FQckERgQq9a50XvqedfiYMC3SByenffZercC",
-	// 	Token:    deckHeaders[0],
-	// 	Email:    "",
-	// 	Password: "",
-	// 	Address:  kongAddr,
-	// }
+	httpClient := utils.HTTPClient()
 
-	// fmt.Printf("Konnect mode enabled. Using token: %s\n", config.Token)
-	return nil, nil
+	// Setup the Konnect client
+	// since Konnect doesn't use kong-admin-token header, we don't
+	// need to take in additional headers
+	fmt.Printf("deckHeaders %v", deckHeaders)
+	config := utils.KonnectConfig{
+		ControlPlaneName: controlPlaneName,
+		Token:            deckHeaders[0],
+		// Email:            "",
+		// Password:         "",
+		Address: kongAddr,
+	}
+
+	// Tack the token on as an auth header
+	if config.Token != "" {
+		config.Headers = append(
+			config.Headers, "Authorization:Bearer "+config.Token,
+		)
+	}
+
+	client, err := utils.GetKonnectClient(httpClient, config)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err.Error())
+	}
+
+	// Before we do anything, we need to login
+	authResponse, err := client.Auth.LoginV2(ctx, config.Email, config.Password, config.Token)
+	fmt.Printf("Name: %v\nOrg ID: %v\nOrg: %v\nFirstName: %v\nLastName: %v\nFullName: %v\n", authResponse.Name, authResponse.OrganizationID, authResponse.Organization, authResponse.FirstName, authResponse.LastName, authResponse.FullName)
+
+	if err != nil {
+		fmt.Println("XError: ", err.Error())
+		return nil, err
+	}
+
+	var listOpt *konnect.ListOpt
+
+	controlPlanes, _, err := client.RuntimeGroups.List(ctx, listOpt)
+
+	if err != nil {
+		fmt.Println("Error: ", err.Error())
+		return nil, err
+	}
+
+	var cpID string
+	for _, controlPlane := range controlPlanes {
+		if *controlPlane.Name == controlPlaneName {
+			cpID = *controlPlane.ID
+		}
+	}
+
+	konnectAddress := kongAddr + "/v2/control-planes/" + cpID + "/core-entities"
+
+	kongClient, err := utils.GetKongClient(utils.KongClientConfig{
+		Address:    konnectAddress,
+		HTTPClient: httpClient,
+		Debug:      config.Debug,
+		Headers:    config.Headers,
+		Retryable:  true,
+		TLSConfig:  config.TLSConfig,
+	})
+
+	if err != nil {
+		fmt.Println("Error: ", err.Error())
+		return nil, err
+	}
+
+	dumpConfig.KonnectControlPlane = controlPlaneName
+	rawState, err := dump.Get(ctx, kongClient, dumpConfig)
+
+	if err != nil {
+		return nil, fmt.Errorf("Failed reading configuration from Kong: %w", err)
+	}
+
+	summaryInfo.TotalConsumerCount = len(rawState.Consumers)
+	summaryInfo.TotalServiceCount = len(rawState.Services)
+	summaryInfo.TotalRouteCount = len(rawState.Routes)
+	summaryInfo.TotalPluginCount = len(rawState.Plugins)
+	summaryInfo.TotalTargetCount = len(rawState.Targets)
+	summaryInfo.TotalUpstreamCount = len(rawState.Upstreams)
+
+	ks, err := state.Get(rawState)
+
+	if err != nil {
+		return nil, fmt.Errorf("building state: %w", err)
+	}
+
+	err = file.KongStateToFile(ks, file.WriteConfig{
+		SelectTags: dumpConfig.SelectorTags,
+		Filename:   "konnect" + controlPlaneName + ".yaml",
+		// FileFormat:       file.Format(strings.ToUpper("yaml")),
+		FileFormat:       file.YAML,
+		WithID:           true,
+		ControlPlaneName: controlPlaneName,
+		KongVersion:      "3.5.0.0", //placeholder
+	})
+
+	if err != nil {
+		log.Errorf("building Kong dump file: %w", err)
+	} else {
+		log.Info("Successfully dumped Control Plane: ", controlPlaneName)
+		filesToZip = append(filesToZip, "konnect"+controlPlaneName+".yaml")
+	}
+
+	finalResponse["summary_info"] = summaryInfo
+
+	jsonBytes, err := json.Marshal(finalResponse)
+
+	if err != nil {
+		log.Error("Error marshalling json:", err)
+		return nil, err
+	}
+
+	err = os.WriteFile("KDD.json", jsonBytes, 0644)
+	if err != nil {
+		log.Fatal("Error writing KDD.json")
+		return filesToZip, err
+	} else {
+		filesToZip = append(filesToZip, "KDD.json")
+	}
+
+	return filesToZip, nil
 }
 
 func getEndpoint(client *kong.Client, endpoint string) (objx.Map, error) {
