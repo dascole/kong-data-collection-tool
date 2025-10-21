@@ -34,6 +34,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kong/go-database-reconciler/pkg/konnect"
@@ -416,7 +417,8 @@ func runDocker(filesToCopy []string, commandsToRun []NamedCommand) ([]string, er
 
 	log.WithField("count", len(containers)).Info("Found containers running")
 
-	var kongContainers []types.Container
+	// Pre-allocate with reasonable capacity
+	kongContainers := make([]types.Container, 0, 10)
 
 	for _, container := range containers {
 		for _, i := range kongImages {
@@ -428,7 +430,8 @@ func runDocker(filesToCopy []string, commandsToRun []NamedCommand) ([]string, er
 
 	log.WithField("count", len(kongContainers)).Info("Found Kong containers")
 
-	var filesToZip []string
+	// Pre-allocate with estimated capacity (files per container * container count)
+	filesToZip := make([]string, 0, len(kongContainers)*5)
 
 	for _, c := range kongContainers {
 		log.WithField("containerID", c.ID).Info("Inspecting container")
@@ -700,72 +703,142 @@ func getKDD() ([]string, error) {
 			createWorkspaceConfigDumps = (os.Getenv("DUMP_WORKSPACE_CONFIGS") == "true")
 		}
 
+		// Process workspaces in parallel with controlled concurrency
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		// Limit concurrent workspace processing to 5 to avoid overwhelming the API
+		semaphore := make(chan struct{}, 5)
+
 		for _, ws := range workspaces.Data {
-			log.WithField("workspace", ws.Name).Info("Processing workspace")
-			client.SetWorkspace(ws.Name)
+			wg.Add(1)
+			go func(workspace struct {
+				Comment interface{} `json:"comment"`
+				Config  struct {
+					Meta                      interface{} `json:"meta"`
+					Portal                    bool        `json:"portal"`
+					PortalAccessRequestEmail  interface{} `json:"portal_access_request_email"`
+					PortalApprovedEmail       interface{} `json:"portal_approved_email"`
+					PortalAuth                interface{} `json:"portal_auth"`
+					PortalAuthConf            interface{} `json:"portal_auth_conf"`
+					PortalAutoApprove         interface{} `json:"portal_auto_approve"`
+					PortalCorsOrigins         interface{} `json:"portal_cors_origins"`
+					PortalDeveloperMetaFields string      `json:"portal_developer_meta_fields"`
+					PortalEmailsFrom          interface{} `json:"portal_emails_from"`
+					PortalEmailsReplyTo       interface{} `json:"portal_emails_reply_to"`
+					PortalInviteEmail         interface{} `json:"portal_invite_email"`
+					PortalIsLegacy            interface{} `json:"portal_is_legacy"`
+					PortalResetEmail          interface{} `json:"portal_reset_email"`
+					PortalResetSuccessEmail   interface{} `json:"portal_reset_success_email"`
+					PortalSessionConf         interface{} `json:"portal_session_conf"`
+					PortalTokenExp            interface{} `json:"portal_token_exp"`
+				} `json:"config"`
+				CreatedAt int    `json:"created_at"`
+				ID        string `json:"id"`
+				Meta      struct {
+					Color     string      `json:"color"`
+					Thumbnail interface{} `json:"thumbnail"`
+				} `json:"meta"`
+				Name string `json:"name"`
+			}) {
+				defer wg.Done()
+				semaphore <- struct{}{}        // Acquire semaphore
+				defer func() { <-semaphore }() // Release semaphore
 
-			// Queries all the entities using client and returns all the entities in KongRawState.
-			d, err := dump.Get(context.Background(), client, dump.Config{
-				RBACResourcesOnly: false,
-				SkipConsumers:     false,
-			})
+				log.WithField("workspace", workspace.Name).Info("Processing workspace")
 
-			if err != nil {
-				log.WithFields(log.Fields{
-					"workspace": ws.Name,
-					"error":     err,
-				}).Error("Error getting workspace data, continuing to next workspace")
-				continue
-			}
-
-			// tally up the entity counts
-			summaryInfo.TotalConsumerCount += len(d.Consumers)
-			summaryInfo.TotalServiceCount += len(d.Services)
-			summaryInfo.TotalRouteCount += len(d.Routes)
-			summaryInfo.TotalPluginCount += len(d.Plugins)
-			summaryInfo.TotalTargetCount += len(d.Targets)
-			summaryInfo.TotalUpstreamCount += len(d.Upstreams)
-
-			// iterate through the routes and count regex routes
-			for _, v := range d.Routes {
-				for _, route := range v.Paths {
-					if strings.HasPrefix(*route, "~") {
-						summaryInfo.TotalRegExRoutes += 1
-					}
-				}
-			}
-
-			// Check if portal is enabled
-			if ws.Config.Portal {
-				summaryInfo.TotalEnabledDevPortalCount += 1
-			}
-
-			if createWorkspaceConfigDumps {
-				ks, err := state.Get(d)
-				if err != nil {
-					log.WithFields(log.Fields{
-						"workspace": ws.Name,
-						"error":     err,
-					}).Error("Error building Kong dump state")
-					continue
-				}
-
-				err = file.KongStateToFile(ks, file.WriteConfig{
-					KongVersion: summaryInfo.KongVersion,
-					Filename:    ws.Name + "-kong-dump.yaml",
-					FileFormat:  file.YAML,
+				// Create a workspace-specific client to avoid race conditions
+				wsClient, err := utils.GetKongClient(utils.KongClientConfig{
+					Address: kongAddr,
+					TLSConfig: utils.TLSConfig{
+						SkipVerify: true,
+					},
+					Debug:   false,
+					Headers: deckHeaders,
 				})
 				if err != nil {
 					log.WithFields(log.Fields{
-						"workspace": ws.Name,
+						"workspace": workspace.Name,
 						"error":     err,
-					}).Error("Error building Kong dump file")
-				} else {
-					log.WithField("workspace", ws.Name).Info("Successfully dumped workspace")
-					filesToZip = append(filesToZip, ws.Name+"-kong-dump.yaml")
+					}).Error("Failed to get Kong client for workspace")
+					return
 				}
-			}
+
+				wsClient.SetWorkspace(workspace.Name)
+
+				// Queries all the entities using client and returns all the entities in KongRawState.
+				d, err := dump.Get(context.Background(), wsClient, dump.Config{
+					RBACResourcesOnly: false,
+					SkipConsumers:     false,
+				})
+
+				if err != nil {
+					log.WithFields(log.Fields{
+						"workspace": workspace.Name,
+						"error":     err,
+					}).Error("Error getting workspace data, continuing to next workspace")
+					return
+				}
+
+				// Count regex routes
+				regexRouteCount := 0
+				for _, v := range d.Routes {
+					for _, route := range v.Paths {
+						if strings.HasPrefix(*route, "~") {
+							regexRouteCount++
+						}
+					}
+				}
+
+				// Check if portal is enabled
+				portalEnabled := 0
+				if workspace.Config.Portal {
+					portalEnabled = 1
+				}
+
+				// Update summary info with mutex protection
+				mu.Lock()
+				summaryInfo.TotalConsumerCount += len(d.Consumers)
+				summaryInfo.TotalServiceCount += len(d.Services)
+				summaryInfo.TotalRouteCount += len(d.Routes)
+				summaryInfo.TotalPluginCount += len(d.Plugins)
+				summaryInfo.TotalTargetCount += len(d.Targets)
+				summaryInfo.TotalUpstreamCount += len(d.Upstreams)
+				summaryInfo.TotalRegExRoutes += regexRouteCount
+				summaryInfo.TotalEnabledDevPortalCount += portalEnabled
+				mu.Unlock()
+
+				if createWorkspaceConfigDumps {
+					ks, err := state.Get(d)
+					if err != nil {
+						log.WithFields(log.Fields{
+							"workspace": workspace.Name,
+							"error":     err,
+						}).Error("Error building Kong dump state")
+						return
+					}
+
+					err = file.KongStateToFile(ks, file.WriteConfig{
+						KongVersion: summaryInfo.KongVersion,
+						Filename:    workspace.Name + "-kong-dump.yaml",
+						FileFormat:  file.YAML,
+					})
+					if err != nil {
+						log.WithFields(log.Fields{
+							"workspace": workspace.Name,
+							"error":     err,
+						}).Error("Error building Kong dump file")
+					} else {
+						log.WithField("workspace", workspace.Name).Info("Successfully dumped workspace")
+						mu.Lock()
+						filesToZip = append(filesToZip, workspace.Name+"-kong-dump.yaml")
+						mu.Unlock()
+					}
+				}
+			}(ws)
 		}
+
+		// Wait for all workspaces to be processed
+		wg.Wait()
 
 		// Add the full info now we know we have it all
 		finalResponse["summary_info"] = summaryInfo
@@ -973,8 +1046,9 @@ func getWorkspaces(client *kong.Client) (*Workspaces, error) {
 func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string, error) {
 	log.Info("Running Kubernetes collection")
 	ctx := context.Background()
-	var kongK8sPods []corev1.Pod
-	var filesToZip []string
+	// Pre-allocate with reasonable capacity
+	kongK8sPods := make([]corev1.Pod, 0, 20)
+	filesToZip := make([]string, 0, 50)
 
 	kubeClient, clientConfig, err := createClient()
 	if err != nil {
@@ -1044,71 +1118,96 @@ func runKubernetes(filesToCopy []string, commandsToRun []NamedCommand) ([]string
 			filesToZip = append(filesToZip, logFilenames...)
 		}
 
+		// Process pods in parallel with controlled concurrency
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		// Limit concurrent pod processing to 10 to avoid overwhelming the API server
+		semaphore := make(chan struct{}, 10)
+
 		for _, pod := range kongK8sPods {
-			log.WithFields(log.Fields{
-				"pod":       pod.Name,
-				"namespace": pod.Namespace,
-			}).Info("Processing pod")
+			wg.Add(1)
+			go func(p corev1.Pod) {
+				defer wg.Done()
+				semaphore <- struct{}{}        // Acquire semaphore
+				defer func() { <-semaphore }() // Release semaphore
 
-			for _, container := range pod.Spec.Containers {
-				relevantImage := false
-				for _, i := range kongImages {
-					if strings.Contains(container.Image, i) {
-						relevantImage = true
-						break
+				log.WithFields(log.Fields{
+					"pod":       p.Name,
+					"namespace": p.Namespace,
+				}).Info("Processing pod")
+
+				var podFiles []string
+
+				for _, container := range p.Spec.Containers {
+					relevantImage := false
+					for _, i := range kongImages {
+						if strings.Contains(container.Image, i) {
+							relevantImage = true
+							break
+						}
+					}
+
+					if !relevantImage {
+						continue
+					}
+
+					log.WithField("container", container.Name).Info("Processing container")
+
+					for _, file := range filesToCopy {
+						namedCmd := NamedCommand{
+							Cmd:  []string{"cat", file},
+							Name: file,
+						}
+
+						filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, p.Namespace, p.Name, container.Name, namedCmd)
+						if err != nil {
+							log.WithFields(log.Fields{
+								"pod":       p.Name,
+								"container": container.Name,
+								"file":      file,
+								"error":     err,
+							}).Error("Error copying file from pod")
+						} else if filename != "" {
+							log.WithFields(log.Fields{
+								"pod":      p.Name,
+								"file":     file,
+								"filename": filename,
+							}).Debug("Copied file from pod")
+							podFiles = append(podFiles, filename)
+						}
+					}
+
+					for _, namedCmd := range commandsToRun {
+						filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, p.Namespace, p.Name, container.Name, namedCmd)
+						if err != nil {
+							log.WithFields(log.Fields{
+								"pod":       p.Name,
+								"container": container.Name,
+								"command":   strings.Join(namedCmd.Cmd, " "),
+								"error":     err,
+							}).Error("Error running command in pod")
+						} else if filename != "" {
+							log.WithFields(log.Fields{
+								"pod":      p.Name,
+								"command":  strings.Join(namedCmd.Cmd, " "),
+								"filename": filename,
+							}).Debug("Command executed in pod")
+							podFiles = append(podFiles, filename)
+						}
 					}
 				}
 
-				if !relevantImage {
-					continue
+				// Add collected files to the shared filesToZip slice with mutex protection
+				if len(podFiles) > 0 {
+					mu.Lock()
+					filesToZip = append(filesToZip, podFiles...)
+					mu.Unlock()
 				}
-
-				log.WithField("container", container.Name).Info("Processing container")
-
-				for _, file := range filesToCopy {
-					namedCmd := NamedCommand{
-						Cmd:  []string{"cat", file},
-						Name: file,
-					}
-
-					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, namedCmd)
-					if err != nil {
-						log.WithFields(log.Fields{
-							"pod":       pod.Name,
-							"container": container.Name,
-							"file":      file,
-							"error":     err,
-						}).Error("Error copying file from pod")
-					} else if filename != "" {
-						log.WithFields(log.Fields{
-							"pod":      pod.Name,
-							"file":     file,
-							"filename": filename,
-						}).Debug("Copied file from pod")
-						filesToZip = append(filesToZip, filename)
-					}
-				}
-
-				for _, namedCmd := range commandsToRun {
-					filename, err := RunCommandInPod(ctx, kubeClient, clientConfig, pod.Namespace, pod.Name, container.Name, namedCmd)
-					if err != nil {
-						log.WithFields(log.Fields{
-							"pod":       pod.Name,
-							"container": container.Name,
-							"command":   strings.Join(namedCmd.Cmd, " "),
-							"error":     err,
-						}).Error("Error running command in pod")
-					} else if filename != "" {
-						log.WithFields(log.Fields{
-							"pod":      pod.Name,
-							"command":  strings.Join(namedCmd.Cmd, " "),
-							"filename": filename,
-						}).Debug("Command executed in pod")
-						filesToZip = append(filesToZip, filename)
-					}
-				}
-			}
+			}(pod)
 		}
+
+		// Wait for all pods to be processed
+		wg.Wait()
 	} else {
 		log.Warn("No pods with the appropriate container images found in cluster")
 	}
@@ -1185,40 +1284,48 @@ func runVM() ([]string, error) {
 
 		filesToZip = append(filesToZip, "vm-kong-env.txt")
 
-		// Memory info
-		if err := getResourceAndMarshall(RetrieveVMMemoryInfo, "memory", vmMemoryLogFile); err != nil {
-			log.WithError(err).Error("Error retrieving memory info")
-		} else {
-			filesToZip = append(filesToZip, vmMemoryLogFile)
+		// Collect VM resources in parallel
+		type resourceTask struct {
+			function     func() (interface{}, error)
+			resourceType string
+			logFile      string
 		}
 
-		// CPU info
-		if err := getResourceAndMarshall(RetrieveVMCPUInfo, "cpu", vmCPULogFile); err != nil {
-			log.WithError(err).Error("Error retrieving CPU info")
-		} else {
-			filesToZip = append(filesToZip, vmCPULogFile)
+		tasks := []resourceTask{
+			{RetrieveVMMemoryInfo, "memory", vmMemoryLogFile},
+			{RetrieveVMCPUInfo, "cpu", vmCPULogFile},
+			{RetrieveVMDiskInfo, "disk", vmDiskLogFile},
+			{RetrieveProcessInfo, "process", vmProcessLogFile},
+			{RetrieveNetworkInfo, "network", vmNetworkLogFile},
 		}
 
-		// Disk info
-		if err := getResourceAndMarshall(RetrieveVMDiskInfo, "disk", vmDiskLogFile); err != nil {
-			log.WithError(err).Error("Error retrieving disk info")
-		} else {
-			filesToZip = append(filesToZip, vmDiskLogFile)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		resourceFiles := make([]string, 0, len(tasks))
+
+		for _, task := range tasks {
+			wg.Add(1)
+			go func(t resourceTask) {
+				defer wg.Done()
+
+				if err := getResourceAndMarshall(t.function, t.resourceType, t.logFile); err != nil {
+					log.WithFields(log.Fields{
+						"resourceType": t.resourceType,
+						"error":        err,
+					}).Error("Error retrieving resource info")
+				} else {
+					mu.Lock()
+					resourceFiles = append(resourceFiles, t.logFile)
+					mu.Unlock()
+				}
+			}(task)
 		}
 
-		// Process info
-		if err := getResourceAndMarshall(RetrieveProcessInfo, "process", vmProcessLogFile); err != nil {
-			log.WithError(err).Error("Error retrieving process info")
-		} else {
-			filesToZip = append(filesToZip, vmProcessLogFile)
-		}
+		// Wait for all resource collection to complete
+		wg.Wait()
 
-		// Network info
-		if err := getResourceAndMarshall(RetrieveNetworkInfo, "network", vmNetworkLogFile); err != nil {
-			log.WithError(err).Error("Error retrieving network info")
-		} else {
-			filesToZip = append(filesToZip, vmNetworkLogFile)
-		}
+		// Add all successfully collected resource files
+		filesToZip = append(filesToZip, resourceFiles...)
 
 		for _, v := range filesToCopy {
 			if err := copyFiles(v[0], v[1]); err != nil {
@@ -1321,43 +1428,57 @@ func collectAndLimitLog(envars, configKey string) string {
 
 			defer logFile.Close()
 
-			singleByteBuffer := make([]byte, 1)
+			// Use buffered reading for better performance
+			const bufferSize = 64 * 1024 // 64KB buffer
+			buffer := make([]byte, bufferSize)
 			var singleLineBytes []byte
 			linesProcessed := int64(0)
 			bytesProcessed := int64(0)
 			success := false
 
-			for {
+			// Read backwards in chunks
+			for bytesProcessed < logLength && linesProcessed < lineLimit {
+				// Calculate how much to read
+				chunkSize := int64(bufferSize)
+				readPos := logLength - bytesProcessed - chunkSize
+				if readPos < 0 {
+					chunkSize += readPos
+					readPos = 0
+				}
+
+				// Read a chunk
+				n, err := logFile.ReadAt(buffer[:chunkSize], readPos)
+				if err != nil && err != io.EOF {
+					log.WithFields(log.Fields{
+						"logPath": logPath,
+						"error":   err,
+					}).Error("Unable to read from log file")
+					break
+				}
+
+				// Process the chunk backwards
+				for i := n - 1; i >= 0 && linesProcessed < lineLimit; i-- {
+					lastReadByte := buffer[i]
+					bytesProcessed++
+
+					// Check for \n byte
+					if lastReadByte == 10 {
+						// Reverse the line since we're reading backwards
+						for j, k := 0, len(singleLineBytes)-1; j < k; j, k = j+1, k-1 {
+							singleLineBytes[j], singleLineBytes[k] = singleLineBytes[k], singleLineBytes[j]
+						}
+
+						logLines = append(logLines, string(singleLineBytes))
+						singleLineBytes = singleLineBytes[:0] // Reuse slice
+						linesProcessed++
+						success = true
+					} else {
+						singleLineBytes = append(singleLineBytes, lastReadByte)
+					}
+				}
+
 				if bytesProcessed >= logLength || linesProcessed >= lineLimit {
 					break
-				}
-
-				if _, err := logFile.ReadAt(singleByteBuffer, logLength-bytesProcessed-1); err != nil {
-					if err != io.EOF {
-						log.WithFields(log.Fields{
-							"logPath": logPath,
-							"error":   err,
-						}).Error("Unable to read a byte from log file")
-					}
-					break
-				}
-
-				lastReadByte := singleByteBuffer[0]
-				bytesProcessed++
-
-				// Check for \n byte. No support for \r\n yet.
-				if lastReadByte == 10 {
-					// Reverse the line since we're reading backwards
-					for i, j := 0, len(singleLineBytes)-1; i < j; i, j = i+1, j-1 {
-						singleLineBytes[i], singleLineBytes[j] = singleLineBytes[j], singleLineBytes[i]
-					}
-
-					logLines = append(logLines, string(singleLineBytes[:]))
-					singleLineBytes = make([]byte, 0)
-					linesProcessed++
-					success = true
-				} else {
-					singleLineBytes = append(singleLineBytes, lastReadByte)
 				}
 			}
 
@@ -1458,7 +1579,8 @@ func createClient() (kubernetes.Interface, *rest.Config, error) {
 }
 
 func writePodDetails(ctx context.Context, clientSet kubernetes.Interface, podList []corev1.Pod) ([]string, error) {
-	var logFilenames []string
+	// Pre-allocate with estimated capacity (2 files per pod: logs + yaml)
+	logFilenames := make([]string, 0, len(podList)*2)
 
 	for _, pod := range podList {
 		p, err := clientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
@@ -1719,7 +1841,8 @@ func RetrieveNetworkInfo() (interface{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	netStats := []NetworkInfo{}
+	// Pre-allocate with reasonable capacity
+	netStats := make([]NetworkInfo, 0, 100)
 	conn, err := net.ConnectionsWithContext(ctx, "all")
 
 	if err != nil {
@@ -1748,7 +1871,8 @@ func RetrieveProcessInfo() (interface{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ps := []ProcessInfo{}
+	// Pre-allocate with reasonable capacity
+	ps := make([]ProcessInfo, 0, 100)
 	processes, err := process.ProcessesWithContext(ctx)
 
 	if err != nil {
@@ -1909,7 +2033,8 @@ func WriteOutputToFile(filename string, data []byte) error {
 }
 
 func RunCommandsInContainer(ctx context.Context, cli *client.Client, containerID string, commands []NamedCommand) ([]string, error) {
-	var filesToWrite []string
+	// Pre-allocate with the number of commands
+	filesToWrite := make([]string, 0, len(commands))
 
 	for _, nc := range commands {
 		log.WithFields(log.Fields{
@@ -2003,7 +2128,8 @@ func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerI
 		"fileCount":   len(files),
 	}).Debug("Copying files from container")
 
-	var filesToWrite []string
+	// Pre-allocate with the number of files
+	filesToWrite := make([]string, 0, len(files))
 
 	for _, file := range files {
 		log.WithFields(log.Fields{
