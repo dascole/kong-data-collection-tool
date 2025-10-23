@@ -2159,6 +2159,23 @@ func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerI
 				break
 			}
 
+			// Skip non-regular files (directories, symlinks, etc.)
+			if header.Typeflag != tar.TypeReg {
+				log.WithFields(log.Fields{
+					"filename": header.Name,
+					"type":     header.Typeflag,
+				}).Debug("Skipping non-regular file")
+				continue
+			}
+
+			// Warn if file is empty
+			if header.Size == 0 {
+				log.WithFields(log.Fields{
+					"filename": header.Name,
+					"size":     header.Size,
+				}).Warn("File is empty in container")
+			}
+
 			outFile, err := os.Create(header.Name)
 			if err != nil {
 				log.WithFields(log.Fields{
@@ -2168,9 +2185,7 @@ func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerI
 				continue
 			}
 
-			filesToWrite = append(filesToWrite, header.Name)
-
-			_, err = io.Copy(outFile, tarReader)
+			bytesWritten, err := io.Copy(outFile, tarReader)
 			if err != nil {
 				log.WithFields(log.Fields{
 					"filename": header.Name,
@@ -2181,6 +2196,13 @@ func CopyFilesFromContainers(ctx context.Context, cli *client.Client, containerI
 			}
 
 			outFile.Close()
+
+			// Only add to list if successfully written
+			log.WithFields(log.Fields{
+				"filename":     header.Name,
+				"bytesWritten": bytesWritten,
+			}).Debug("Successfully copied file from container")
+			filesToWrite = append(filesToWrite, header.Name)
 		}
 		reader.Close()
 	}
@@ -2267,7 +2289,29 @@ func cleanupFiles(filesToCleanup []string) error {
 
 	for _, file := range filesToCleanup {
 		log.WithField("file", file).Debug("Cleaning up file")
-		err := os.Remove(file)
+
+		// Check if file exists before attempting removal
+		fileInfo, err := os.Stat(file)
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.WithField("file", file).Debug("File already removed or does not exist, skipping")
+				continue
+			}
+			log.WithFields(log.Fields{
+				"file":  file,
+				"error": err,
+			}).Warn("Error checking file status")
+			continue
+		}
+
+		// Skip if it's a directory
+		if fileInfo.IsDir() {
+			log.WithField("file", file).Debug("Skipping directory, not a file")
+			continue
+		}
+
+		// Now remove the file
+		err = os.Remove(file)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"file":  file,
