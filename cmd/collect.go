@@ -246,12 +246,12 @@ var collectCmd = &cobra.Command{
 
 		case "vm":
 			log.Info("Using VM runtime")
-			// vmFilesToZip, err := runVM()
-			// if err != nil {
-			//     log.WithError(err).Error("Error with VM runtime collection")
-			// } else {
-			//     filesToZip = append(filesToZip, vmFilesToZip...)
-			// }
+			vmFilesToZip, err := runVM()
+			if err != nil {
+				log.WithError(err).Error("Error with VM runtime collection")
+			} else {
+				filesToZip = append(filesToZip, vmFilesToZip...)
+			}
 		default:
 			log.WithField("runtime", rType).Error("Runtime not supported")
 		}
@@ -639,22 +639,22 @@ func getKDD() ([]string, error) {
 		})
 
 		if err != nil {
-			log.WithError(err).Error("Failed to get Kong client")
-			return nil, err
+			log.WithError(err).Warn("Failed to get Kong client, skipping KDD collection")
+			return filesToZip, nil
 		}
 
 		// response of GET request on the root of the Admin
 		root, err := client.RootJSON(context.Background())
 		if err != nil {
-			log.WithError(err).Error("Failed to get root JSON from Kong")
-			return nil, err
+			log.WithError(err).Warn("Failed to get root JSON from Kong, skipping KDD collection")
+			return filesToZip, nil
 		}
 
 		// create a map from the JSON response
 		rootConfig, err = objx.FromJSON(string(root))
 		if err != nil {
-			log.WithError(err).Error("Failed to parse root JSON")
-			return nil, err
+			log.WithError(err).Warn("Failed to parse root JSON, skipping KDD collection")
+			return filesToZip, nil
 		}
 
 		// Get the status and list of workspaces
@@ -665,8 +665,8 @@ func getKDD() ([]string, error) {
 
 		workspaces, err := getWorkspaces(client)
 		if err != nil {
-			log.WithError(err).Error("Failed to get workspaces")
-			return nil, err
+			log.WithError(err).Warn("Failed to get workspaces, skipping KDD collection")
+			return filesToZip, nil
 		}
 
 		// Get the license report
