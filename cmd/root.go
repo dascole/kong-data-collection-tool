@@ -28,8 +28,8 @@ import (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:    "kdt",
-	Short:  "Kong debug tool",
+	Use:    "dct",
+	Short:  "Kong data collection tool",
 	Long:   `A tool for extracting logs, metrics and configuration data from your kong instances.`,
 	PreRun: toggleDebug,
 	// Uncomment the following line if your bare application
@@ -46,5 +46,5 @@ func Execute() {
 }
 
 func init() {
-	//rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "verbose logging")
+	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Enable verbose debug logging")
 }
