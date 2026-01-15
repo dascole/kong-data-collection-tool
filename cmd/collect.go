@@ -37,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kong/deck/sanitize"
 	"github.com/kong/go-database-reconciler/pkg/konnect"
 
 	"github.com/docker/docker/api/types"
@@ -85,10 +86,9 @@ const (
 var (
 	rType                      string
 	konnectMode                bool
-	konnectToken               string
 	controlPlaneName           string
 	kongImages                 []string
-	headers                    []string
+	deckHeaders                []string
 	targetPods                 []string
 	kongConf                   string
 	prefixDir                  string
@@ -102,23 +102,20 @@ var (
 	createWorkspaceConfigDumps bool
 	disableKDDCollection       bool
 	strToRedact                []string
+	sanitizeConfigs            bool
 )
 
 // initLogging sets up logrus with standard configuration
 func initLogging() {
-	// Only initialize if not already configured by debug flag
-	// toggleDebug runs in PreRun, so we don't want to override it
-	if !debug {
-		// Configure logrus with timestamp, level, and caller information
-		log.SetFormatter(&log.TextFormatter{
-			FullTimestamp:   true,
-			TimestampFormat: "2006-01-02 15:04:05",
-		})
-		// Set output to stdout
-		log.SetOutput(os.Stdout)
-		// Set default log level
-		log.SetLevel(log.InfoLevel)
-	}
+	// Configure logrus with timestamp, level, and caller information
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: "2006-01-02 15:04:05",
+	})
+	// Set output to stdout
+	log.SetOutput(os.Stdout)
+	// Set default log level
+	log.SetLevel(log.InfoLevel)
 }
 
 type Summary struct {
@@ -197,12 +194,6 @@ var collectCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Initialize logging at the start
 		initLogging()
-
-		// Validate that Konnect mode requires a token
-		if konnectMode && konnectToken == "" {
-			log.Error("Konnect mode requires a Personal Access Token (PAT) to be provided via the --konnect-token flag")
-			return fmt.Errorf("--konnect-mode requires --konnect-token to be set")
-		}
 
 		var filesToZip []string
 
@@ -303,12 +294,11 @@ var (
 
 func init() {
 	rootCmd.AddCommand(collectCmd)
-	collectCmd.PersistentFlags().StringVarP(&controlPlaneName, "konnect-control-plane-name", "c", "default", "Konnect Control Plane name.")
+	collectCmd.PersistentFlags().StringVarP(&controlPlaneName, "konnect-control-plane-name", "c", "", "Konnect Control Plane name.")
 	collectCmd.PersistentFlags().StringVarP(&rType, "runtime", "r", "", "Runtime to extract logs from (kubernetes or docker). Runtime is auto detected if omitted.")
 	collectCmd.PersistentFlags().BoolVarP(&konnectMode, "konnect-mode", "x", false, "Enables Konnect mode. This will use the Konnect API to collect data.")
-	collectCmd.PersistentFlags().StringVar(&konnectToken, "konnect-token", "", "Konnect Personal Access Token (PAT). Required when using --konnect-mode.")
-	collectCmd.PersistentFlags().StringSliceVar(&headers, "headers", nil, "HTTP headers (key:value) to inject in all requests to Kong's Admin API. This flag can be specified multiple times, or use a comma-separated list.")
 	collectCmd.PersistentFlags().StringSliceVarP(&kongImages, "target-images", "i", defaultKongImageList, `Override default gateway images to scrape logs from. Default: "kong-gateway","kubernetes-ingress-controller"`)
+	collectCmd.PersistentFlags().StringSliceVarP(&deckHeaders, "rbac-header", "H", nil, "RBAC header required to contact the admin-api.")
 	collectCmd.PersistentFlags().StringVarP(&kongAddr, "kong-addr", "a", "http://localhost:8001", "The address to reach the admin-api of the Kong instance in question.")
 	collectCmd.PersistentFlags().BoolVarP(&createWorkspaceConfigDumps, "dump-workspace-configs", "d", false, "Deck dump workspace configs to yaml files. Default: false. NOTE: Will not work if --disable-kdd=true")
 	collectCmd.PersistentFlags().StringSliceVarP(&targetPods, "target-pods", "p", nil, "CSV list of pod names to target when extracting logs. Default is to scan all running pods for Kong images.")
@@ -318,6 +308,7 @@ func init() {
 	collectCmd.PersistentFlags().StringVarP(&prefixDir, "prefix-dir", "k", "/usr/local/kong", "The path to your prefix directory for determining VM log locations. Default: /usr/local/kong")
 	collectCmd.PersistentFlags().BoolVarP(&disableKDDCollection, "disable-kdd", "q", false, "Disable KDD config collection. Default: false.")
 	collectCmd.PersistentFlags().StringSliceVarP(&strToRedact, "redact-logs", "R", nil, "CSV list of terms to redact during log extraction.")
+	collectCmd.PersistentFlags().BoolVarP(&sanitizeConfigs, "sanitize", "s", false, "Sanitize sensitive data in config dumps. Default: false.")
 }
 
 func formatJSON(data []byte) ([]byte, error) {
@@ -327,6 +318,74 @@ func formatJSON(data []byte) ([]byte, error) {
 		return out.Bytes(), err
 	}
 	return data, nil
+}
+
+// sanitizeKongState sanitizes a Kong state and writes it to a file
+func sanitizeKongState(ctx context.Context, client *kong.Client, ks *state.KongState, writeConfig file.WriteConfig, isKonnect bool) error {
+	if !sanitizeConfigs {
+		// If sanitization is disabled, use the regular write method
+		return file.KongStateToFile(ks, writeConfig)
+	}
+
+	// Convert Kong state to file content
+	writeConfig.WithID = true // always write IDs for sanitization
+	fileContent, err := file.KongStateToContent(ks, writeConfig)
+	if err != nil {
+		return fmt.Errorf("converting Kong state to content: %w", err)
+	}
+
+	// Create sanitizer with empty salt (will auto-generate random salt)
+	sanitizer := sanitize.NewSanitizer(&sanitize.SanitizerOptions{
+		Ctx:       ctx,
+		Client:    client,
+		Content:   fileContent,
+		IsKonnect: isKonnect,
+		Salt:      "", // Empty salt triggers automatic random salt generation
+	})
+
+	// Sanitize content
+	sanitizedContent, err := sanitizer.Sanitize()
+	if err != nil {
+		return fmt.Errorf("sanitizing content: %w", err)
+	}
+
+	// Write sanitized content to file
+	return file.WriteContentToFile(sanitizedContent, writeConfig.Filename, writeConfig.FileFormat)
+}
+
+// sanitizeRootConfig sanitizes sensitive fields in the Kong root configuration
+func sanitizeRootConfig(config objx.Map) objx.Map {
+	if !sanitizeConfigs {
+		return config
+	}
+
+	// Create a copy to avoid mutating the original
+	sanitized := objx.New(config)
+
+	// List of sensitive configuration keys that should be redacted
+	sensitiveKeys := []string{
+		"pg_password",
+		"cassandra_password",
+		"admin_gui_session_conf",
+		"portal_session_conf",
+		"vitals_tsdb_address",
+		"cluster_cert_key",
+		"ssl_cert_key",
+		"admin_ssl_cert_key",
+		"client_ssl_cert_key",
+	}
+
+	// Redact sensitive configuration values
+	if confValue := sanitized.Get("configuration"); confValue.IsObjxMap() {
+		confMap := confValue.ObjxMap()
+		for _, key := range sensitiveKeys {
+			if confMap.Has(key) {
+				confMap.Set(key, "<REDACTED>")
+			}
+		}
+	}
+
+	return sanitized
 }
 
 func guessRuntime() (string, error) {
@@ -635,12 +694,8 @@ func getKDD() ([]string, error) {
 		kongAddr = os.Getenv("KONG_ADDR")
 	}
 
-	if os.Getenv("KONNECT_TOKEN") != "" {
-		konnectToken = os.Getenv("KONNECT_TOKEN")
-	}
-
-	if os.Getenv("HEADERS") != "" {
-		headers = strings.Split(os.Getenv("HEADERS"), ",")
+	if os.Getenv("RBAC_HEADER") != "" {
+		deckHeaders = strings.Split(os.Getenv("RBAC_HEADER"), ",")
 	}
 
 	if !konnectMode {
@@ -651,7 +706,7 @@ func getKDD() ([]string, error) {
 				SkipVerify: true,
 			},
 			Debug:   false,
-			Headers: headers,
+			Headers: deckHeaders,
 		})
 
 		if err != nil {
@@ -707,7 +762,7 @@ func getKDD() ([]string, error) {
 		}
 
 		// Add the root config, status, and license report to the final response map
-		finalResponse["root_config"] = rootConfig
+		finalResponse["root_config"] = sanitizeRootConfig(rootConfig)
 		finalResponse["status"] = status
 		finalResponse["license_report"] = licenseReport
 
@@ -769,7 +824,7 @@ func getKDD() ([]string, error) {
 						SkipVerify: true,
 					},
 					Debug:   false,
-					Headers: headers,
+					Headers: deckHeaders,
 				})
 				if err != nil {
 					log.WithFields(log.Fields{
@@ -833,11 +888,11 @@ func getKDD() ([]string, error) {
 						return
 					}
 
-					err = file.KongStateToFile(ks, file.WriteConfig{
+					err = sanitizeKongState(ctx, wsClient, ks, file.WriteConfig{
 						KongVersion: summaryInfo.KongVersion,
 						Filename:    workspace.Name + "-kong-dump.yaml",
 						FileFormat:  file.YAML,
-					})
+					}, false)
 					if err != nil {
 						log.WithFields(log.Fields{
 							"workspace": workspace.Name,
@@ -880,24 +935,18 @@ func getKDD() ([]string, error) {
 	httpClient := utils.HTTPClient()
 
 	// Setup the Konnect client
-	log.WithField("konnectToken", konnectToken).Debug("Using Konnect token")
-
-	// Set the Konnect API base URL
-	// Default to global Konnect API, but allow override via kongAddr if it looks like a Konnect URL
-	konnectAPIURL := "https://global.api.konghq.com"
-	if kongAddr != "http://localhost:8001" && (strings.Contains(kongAddr, "konghq.com") || strings.Contains(kongAddr, "konnect")) {
-		konnectAPIURL = kongAddr
-	}
-
+	log.WithField("deckHeaders", deckHeaders).Debug("Using deck headers")
 	config := utils.KonnectConfig{
 		ControlPlaneName: controlPlaneName,
-		Token:            konnectToken,
-		Address:          konnectAPIURL,
+		Token:            deckHeaders[0],
+		Address:          kongAddr,
 	}
 
-	// Add Authorization header for Konnect API
+	// Tack the token on as an auth header
 	if config.Token != "" {
-		config.Headers = append(config.Headers, "Authorization:Bearer "+config.Token)
+		config.Headers = append(
+			config.Headers, "Authorization:Bearer "+config.Token,
+		)
 	}
 
 	client, err := utils.GetKonnectClient(httpClient, config)
@@ -943,7 +992,7 @@ func getKDD() ([]string, error) {
 		return nil, fmt.Errorf("control plane %s not found", controlPlaneName)
 	}
 
-	konnectAddress := konnectAPIURL + "/v2/control-planes/" + cpID + "/core-entities"
+	konnectAddress := kongAddr + "/v2/control-planes/" + cpID + "/core-entities"
 	kongClient, err := utils.GetKongClient(utils.KongClientConfig{
 		Address:    konnectAddress,
 		HTTPClient: httpClient,
@@ -979,14 +1028,14 @@ func getKDD() ([]string, error) {
 	}
 
 	filename := "konnect-" + controlPlaneName + ".yaml"
-	err = file.KongStateToFile(ks, file.WriteConfig{
+	err = sanitizeKongState(ctx, kongClient, ks, file.WriteConfig{
 		SelectTags:       dumpConfig.SelectorTags,
 		Filename:         filename,
 		FileFormat:       file.YAML,
 		WithID:           true,
 		ControlPlaneName: controlPlaneName,
 		KongVersion:      "3.5.0.0", // placeholder
-	})
+	}, true)
 
 	if err != nil {
 		log.WithFields(log.Fields{
